@@ -1,32 +1,65 @@
-import { FEATURED_ASSETS, type Asset, type Candle, type Market, type MarketsResponse, type Symbol } from '../shared/types.js';
+import { FEATURED_ASSETS, type Asset, type Candle, type HistoryRange, type Market, type MarketHistory, type MarketsResponse, type Symbol } from '../shared/types.js';
 import { HOUR, MIN_HISTORY, indicators } from './analysis.js';
 import { parseCatalog, parseQuotes } from './catalog.js';
 
 export class MarketError extends Error {}
 
-export function parseKraken(symbol: Symbol, payload: unknown, now = Date.now()): Market {
+const HISTORY_INTERVALS = { '1y': 1440, '5y': 10080 } as const;
+
+function parseCandles(payload: unknown, intervalMinutes: number, minimum: number, now: number) {
+  const interval = intervalMinutes * 60_000;
   if (!payload || typeof payload !== 'object') throw new MarketError('Invalid market-data response.');
   const data = payload as { error?: unknown; result?: Record<string, unknown> };
   if (!Array.isArray(data.error) || data.error.length || !data.result) throw new MarketError('Kraken could not return this market.');
   const rows = Object.entries(data.result).find(([key, value]) => key !== 'last' && Array.isArray(value))?.[1];
-  if (!Array.isArray(rows) || rows.length < MIN_HISTORY + 1) throw new MarketError('Insufficient market history.');
+  if (!Array.isArray(rows) || rows.length < minimum + 1) throw new MarketError('Insufficient market history.');
   const parsed = rows.map((row): Candle => {
     if (!Array.isArray(row) || row.length < 8) throw new MarketError('Malformed candle.');
-    const [time, open, high, low, close, vwap, volume] = row.slice(0, 7).map(Number);
-    if (![time, open, high, low, close, vwap, volume].every(Number.isFinite)
-      || Math.min(open, high, low, close, vwap) <= 0 || volume < 0
+    const [time, open, high, low, close, vwap, volume, trades] = row.slice(0, 8).map(Number);
+    // Kraken carries prices through periods with no trades, using zero volume and VWAP.
+    // Keep those observations in the timeline; they contribute no traded volume.
+    const noTrades = volume === 0 && trades === 0;
+    if (![time, open, high, low, close, vwap, volume, trades].every(Number.isFinite)
+      || Math.min(open, high, low, close) <= 0 || volume < 0 || vwap < 0
+      || !Number.isInteger(trades) || trades < 0 || (vwap === 0 && !noTrades)
       || high < Math.max(open, close) || low > Math.min(open, close)) throw new MarketError('Invalid candle values.');
-    return { time: time * 1000 + HOUR, open, high, low, close, volume, vwap };
+    return { time: time * 1000 + interval, open, high, low, close, volume, vwap };
   });
   // Kraken explicitly includes an unfinished final candle. Never use it as a feature or outcome.
   const candles = parsed.slice(0, -1).filter(candle => candle.time <= now);
-  if (candles.length < MIN_HISTORY) throw new MarketError('Insufficient completed market history.');
+  if (candles.length < minimum) throw new MarketError('Insufficient completed market history.');
   for (let index = 1; index < candles.length; index++) {
-    if (candles[index].time - candles[index - 1].time !== HOUR) throw new MarketError('Market history has missing or unordered hourly candles.');
+    const difference = candles[index].time - candles[index - 1].time;
+    if (difference <= 0 || difference % interval !== 0) throw new MarketError('Market history has unordered or misaligned candles.');
+    if (intervalMinutes === 60 && difference !== HOUR) throw new MarketError('Market history has missing hourly candles.');
   }
-  const market = buildMarket(symbol, candles, parsed.at(-1)!.close, now, 'kraken');
+  return { candles, price: parsed.at(-1)!.close };
+}
+
+export function parseKraken(symbol: Symbol, payload: unknown, now = Date.now()): Market {
+  const { candles, price } = parseCandles(payload, 60, MIN_HISTORY, now);
+  const market = buildMarket(symbol, candles, price, now, 'kraken');
   market.stale = now - candles.at(-1)!.time > 2 * HOUR;
   return market;
+}
+
+export function parseKrakenHistory(symbol: Symbol, range: HistoryRange, payload: unknown, now = Date.now()): MarketHistory {
+  const intervalMinutes = HISTORY_INTERVALS[range];
+  const interval = intervalMinutes * 60_000;
+  const from = new Date(now);
+  const month = from.getUTCMonth();
+  from.setUTCFullYear(from.getUTCFullYear() - (range === '1y' ? 1 : 5));
+  // Keep February 29 anchored to the end of February in a non-leap target year.
+  if (from.getUTCMonth() !== month) from.setUTCDate(0);
+  from.setUTCHours(0, 0, 0, 0);
+  const requestedFrom = from.getTime();
+  const candles = parseCandles(payload, intervalMinutes, 2, now).candles.filter(candle => candle.time >= requestedFrom);
+  if (candles.length < 2) throw new MarketError('Not enough completed candles in this time range. Choose a shorter range.');
+  return {
+    symbol, range, intervalMinutes, candles, requestedFrom, fetchedAt: now, source: 'kraken',
+    limited: candles[0].time > requestedFrom + interval,
+    stale: now - candles.at(-1)!.time > 2 * interval,
+  };
 }
 
 function buildMarket(symbol: Symbol, candles: Candle[], price: number, fetchedAt: number, source: Market['source']): Market {
@@ -61,6 +94,8 @@ export function demoMarket(symbol: Symbol, now = Date.now()): Market {
 export class MarketService {
   private cache = new Map<Symbol, Market>();
   private pending = new Map<Symbol, Promise<Market>>();
+  private historyCache = new Map<string, MarketHistory>();
+  private historyPending = new Map<string, Promise<MarketHistory>>();
   private assets: { value: Asset[]; time: number } | null = null;
   private catalogJob: Promise<Asset[]> | null = null;
   private overview: MarketsResponse | null = null;
@@ -112,9 +147,33 @@ export class MarketService {
     if (!response.ok) throw new MarketError(`Kraken is unavailable (HTTP ${response.status}).`);
     const market = parseKraken(symbol, await response.json());
     // Bound memory when browsing hundreds of markets.
-    if (this.cache.size >= 50) this.cache.delete(this.cache.keys().next().value!);
+    if (this.cache.size >= 1000) this.cache.delete(this.cache.keys().next().value!);
     this.cache.set(symbol, market);
     return market;
+  }
+
+  async history(symbol: Symbol, range: HistoryRange): Promise<MarketHistory> {
+    if (this.demo) throw new MarketError('Long-term charts require live Kraken data. Disable demo mode to use 1Y and 5Y.');
+    const key = `${symbol}:${range}`;
+    const cached = this.historyCache.get(key);
+    const now = Date.now();
+    if (cached && now - cached.fetchedAt < HOUR && now < cached.candles.at(-1)!.time + cached.intervalMinutes * 60_000) return { ...cached };
+    const running = this.historyPending.get(key);
+    if (running) return running;
+    const job = (async () => {
+      const asset = (await this.catalog()).find(asset => asset.symbol === symbol);
+      if (!asset) throw new MarketError('This cryptocurrency does not have an active Kraken USD market.');
+      const payload = await this.publicRequest(`OHLC?pair=${encodeURIComponent(asset.pair)}&interval=${HISTORY_INTERVALS[range]}`);
+      const history = parseKrakenHistory(symbol, range, payload);
+      if (this.historyCache.size >= 1000) this.historyCache.delete(this.historyCache.keys().next().value!);
+      this.historyCache.set(key, history);
+      return history;
+    })().catch(error => {
+      if (cached) return { ...cached, stale: true };
+      throw error;
+    }).finally(() => this.historyPending.delete(key));
+    this.historyPending.set(key, job);
+    return job;
   }
 
   async all(): Promise<MarketsResponse> {
@@ -141,12 +200,13 @@ export class MarketService {
     return this.overviewJob;
   }
 
-  async forSymbols(symbols: Symbol[]): Promise<Market[]> {
+  async forSymbols(symbols: Symbol[], onProgress?: (checked: number) => void): Promise<Market[]> {
     const result: Market[] = [];
     const unique = [...new Set(symbols)];
     for (let index = 0; index < unique.length; index += 2) {
       const batch = await Promise.allSettled(unique.slice(index, index + 2).map(symbol => this.get(symbol)));
       for (const item of batch) if (item.status === 'fulfilled') result.push(item.value);
+      onProgress?.(Math.min(index + 2, unique.length));
     }
     return result;
   }

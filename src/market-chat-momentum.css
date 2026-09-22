@@ -1,0 +1,7 @@
+.candidate-momentum { margin: 14px 0; padding-top: 12px; border-top: 1px solid #2d3a32; }
+.candidate-momentum h4 { margin: 0 0 10px; color: #b6cda5; font-size: 9px; font-weight: 500; }
+.candidate-momentum dl { display: grid; gap: 8px; margin: 0; }
+.candidate-momentum dl > div { display: flex; justify-content: space-between; gap: 10px; font-size: 8px; }
+.candidate-momentum dt { color: #829488; }
+.candidate-momentum dd { margin: 0; color: #c8dbb9; font-family: var(--mono); text-align: right; }
+.candidate-momentum p { margin: 10px 0 0; color: #71836a; font-size: 7px; line-height: 1.7; }

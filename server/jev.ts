@@ -4,6 +4,10 @@ import { neutralThreshold } from './analysis.js';
 
 export const MODEL = 'typesafe/jev-1.13';
 export const ENDPOINT = 'https://openrouter.ai/api/v1/systemone';
+// Conservative byte budget leaves room for the provider's question formatting
+// within JEV's 32K-token context. Oversized chat batches are split before sending.
+export const MAX_SYSTEM_ONE_REQUEST_BYTES = 28_000;
+export const systemOneRequestBytes = (body: unknown) => Buffer.byteLength(JSON.stringify(body), 'utf8');
 export class JevError extends Error {
   constructor(message: string, public status = 502) { super(message); }
 }
@@ -78,6 +82,7 @@ export async function askJev(market: Market, horizon: Horizon, apiKey: string, r
 
 export async function requestSystemOne(body: unknown, apiKey: string, request: typeof fetch = fetch) {
   if (!apiKey.trim()) throw new JevError('Add OPENROUTER_API_KEY to .env and restart to enable JEV.', 503);
+  if (systemOneRequestBytes(body) > MAX_SYSTEM_ONE_REQUEST_BYTES) throw new JevError('The JEV request is too large. Shorten the research prompt or start a new conversation.', 413);
   const start = performance.now();
   let response: Response;
   try {
@@ -94,7 +99,18 @@ export async function requestSystemOne(body: unknown, apiKey: string, request: t
       402: 'The OpenRouter account needs credits to run JEV.',
       429: 'OpenRouter rate limit reached. Please retry shortly.',
     };
-    throw new JevError(messages[response.status] ?? `JEV is unavailable (HTTP ${response.status}). Please retry.`, 502);
+    if (messages[response.status]) throw new JevError(messages[response.status], 502);
+    let reason = '';
+    try {
+      const errorBody = await response.json() as { error?: { message?: unknown; metadata?: { raw?: unknown } } | string; message?: unknown; detail?: unknown };
+      const error = errorBody.error;
+      const message = typeof error === 'string' ? error : error?.message ?? errorBody.message ?? errorBody.detail;
+      const raw = typeof error === 'object' ? error?.metadata?.raw : undefined;
+      const fragments = [message, raw].filter((value): value is string => typeof value === 'string');
+      reason = fragments.join(' · ').replaceAll(apiKey, '[redacted]').replace(/sk-or-[a-zA-Z0-9_-]+/g, '[redacted]').replace(/\s+/g, ' ').slice(0, 600);
+    } catch { /* A proxy may return an HTML error instead of JSON. */ }
+    const prefix = response.status === 400 || response.status === 422 ? 'JEV rejected the request' : 'JEV is unavailable';
+    throw new JevError(`${prefix} (HTTP ${response.status}).${reason ? ` ${reason}` : ' No further details were returned by the provider.'}`, 502);
   }
   let payload: unknown;
   try { payload = await response.json(); } catch { throw new JevError('JEV returned an unreadable response.'); }

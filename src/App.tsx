@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Activity, ArrowDown, ArrowDownLeft, ArrowRight, ArrowUp, ArrowUpRight, Bell, BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, Clock3, Cpu, Download, ExternalLink, Gauge, Layers3, LayoutDashboard, ListFilter, LoaderCircle, Menu, MessageSquareText, Radio, RefreshCw, ScanLine, Search, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, Star, TrendingUp, Waves, X, Zap, ChartNoAxesCombined, ChartCandlestick } from 'lucide-react';
-import { FEATURED_ASSETS, assetDetails, HORIZONS, type Asset, type MarketQuote, type ChatMessage, type MarketChatResult, type Direction, type Forecast, type Health, type Horizon, type Market, type MarketsResponse, type Replay, type Symbol } from '../shared/types';
+import { FEATURED_ASSETS, assetDetails, HORIZONS, type Asset, type MarketQuote, type ChatMessage, type MarketChatResult, type Direction, type Forecast, type Health, type HistoryRange, type Horizon, type Market, type MarketHistory, type MarketsResponse, type Replay, type Symbol } from '../shared/types';
 import Chart, { Sparkline } from './Chart';
 import { AssetPicker, ForecastDetail } from './components';
 import MarketChat from './MarketChat';
+import ChatRankings from './ChatRankings';
 import { api, exportJson, horizonLabel, money, percent, shortTime, timeLabel } from './utils';
 
-type View = 'chat' | 'overview' | 'journal' | 'replay' | 'watchlist' | 'settings' | 'methodology';
+type View = 'chat' | 'rankings' | 'overview' | 'journal' | 'replay' | 'watchlist' | 'settings' | 'methodology';
+type ChartRange = 24 | 168 | 720 | HistoryRange;
+const chartRanges: { value: ChartRange; label: string }[] = [{ value: 24, label: '24H' }, { value: 168, label: '7D' }, { value: 720, label: '30D' }, { value: '1y', label: '1Y' }, { value: '5y', label: '5Y' }];
 const directions: Direction[] = ['bullish', 'neutral', 'bearish'];
-const titles: Record<View, string> = { chat: 'AI market chat', overview: 'Market overview', journal: 'Forecast journal', replay: 'Baseline replay', watchlist: 'Your watchlist', settings: 'Model & data', methodology: 'Behind the forecast' };
-const subtitles: Record<View, string> = { chat: 'Your criteria. The entire market. A more informed next move.', overview: 'Read the market. Understand the possibilities.', journal: 'Every prediction, recorded before the outcome.', replay: 'A transparent benchmark against historical observations.', watchlist: 'A focused view of the markets you follow.', settings: 'Your intelligence engine and market connections.', methodology: 'Understand what the numbers can—and cannot—tell you.' };
+const titles: Record<View, string> = { chat: 'AI market chat', rankings: 'Chat rankings', overview: 'Market overview', journal: 'Forecast journal', replay: 'Baseline replay', watchlist: 'Your watchlist', settings: 'Model & data', methodology: 'Behind the forecast' };
+const subtitles: Record<View, string> = { chat: 'Your criteria. The entire market. A more informed next move.', rankings: 'Recorded decisions. Observed returns after 4h, 24h, and 7 days.', overview: 'Read the market. Understand the possibilities.', journal: 'Every prediction, recorded before the outcome.', replay: 'A transparent benchmark against historical observations.', watchlist: 'A focused view of the markets you follow.', settings: 'Your intelligence engine and market connections.', methodology: 'Understand what the numbers can—and cannot—tell you.' };
 
 function Logo({ small = false }: { small?: boolean }) { return <span className={`brand-symbol ${small ? 'small' : ''}`}><svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M8 8h19L17 24H6l6-9h7l-3 4h-4l4-6H5z" fill="currentColor" /></svg></span>; }
 function Coin({ symbol, small = false }: { symbol: Symbol; small?: boolean }) { const asset = assetDetails(symbol); return <span className={`coin ${small ? 'small' : ''} coin-${symbol}`} style={{ '--coin-color': asset.color } as CSSProperties}>{asset.glyph}</span>; }
@@ -27,11 +30,14 @@ export default function App() {
   const [selectedMarket, setSelectedMarket] = useState<Market | undefined>();
   const [marketError, setMarketError] = useState('');
   const [detailLoading, setDetailLoading] = useState(false);
+  const [selectedHistory, setSelectedHistory] = useState<MarketHistory>();
+  const [historyError, setHistoryError] = useState('');
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [inspected, setInspected] = useState<Forecast | null>(null);
   const [forecasts, setForecasts] = useState<Forecast[]>([]);
   const [symbol, setSymbol] = useState<Symbol>('BTC');
   const [horizon, setHorizon] = useState<Horizon>(24);
-  const [range, setRange] = useState(168);
+  const [range, setRange] = useState<ChartRange>(168);
   const [chartKind, setChartKind] = useState<'line' | 'candles'>('line');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
@@ -52,6 +58,13 @@ export default function App() {
   const markets = data?.markets ?? [];
   const assets: Asset[] = data?.assets ?? FEATURED_ASSETS.map(asset => ({ ...asset, tickerKey: asset.pair }));
   const market = selectedMarket?.symbol === symbol ? selectedMarket : undefined;
+  const spotPrice = market?.price ?? markets.find(quote => quote.symbol === symbol)?.price;
+  const historyRange = typeof range === 'string' ? range : undefined;
+  const history = selectedHistory?.symbol === symbol && selectedHistory.range === historyRange ? selectedHistory : undefined;
+  const chartMarket = historyRange ? history : market;
+  const chartLoading = historyRange ? historyLoading : detailLoading;
+  const intervalMinutes = historyRange === '5y' ? 10080 : historyRange === '1y' ? 1440 : 60;
+  const closeLabel = historyRange === '5y' ? 'Weekly' : historyRange === '1y' ? 'Daily' : 'Hourly';
   const latest = forecasts.find(item => item.symbol === symbol && item.horizon === horizon);
   const canJev = Boolean(health?.configured && !health.demo);
 
@@ -63,7 +76,7 @@ export default function App() {
     const problems: string[] = [];
     if (results[0].status === 'fulfilled') setHealth(results[0].value); else problems.push('Cannot connect to the local server.');
     if (results[1].status === 'fulfilled') setData(results[1].value); else problems.push(results[1].reason.message);
-    if (results[2].status === 'fulfilled') setForecasts(results[2].value); else problems.push('Could not load the forecast journal.');
+    if (results[2].status === 'fulfilled') setForecasts(results[2].value); else problems.push(results[2].reason instanceof Error ? results[2].reason.message : 'Could not load the forecast journal.');
     setError(problems.join(' '));
     setLoading(false);
     setRefreshing(false);
@@ -72,10 +85,32 @@ export default function App() {
   useEffect(() => { void refresh(); const interval = setInterval(() => void refresh(true), 60_000); return () => clearInterval(interval); }, [refresh]);
   useEffect(() => {
     const controller = new AbortController();
-    setSelectedMarket(undefined); setMarketError(''); setDetailLoading(true);
-    api<Market>(`/api/markets/${encodeURIComponent(symbol)}`, { signal: controller.signal }).then(setSelectedMarket).catch(error => { if (error.name !== 'AbortError') setMarketError(error.message); }).finally(() => { if (!controller.signal.aborted) setDetailLoading(false); });
+    setMarketError(''); setDetailLoading(true);
+    api<Market>(`/api/markets/${encodeURIComponent(symbol)}`, { signal: controller.signal }).then(result => {
+      if (!controller.signal.aborted) setSelectedMarket(result);
+    }).catch(error => {
+      if (!controller.signal.aborted) {
+        setMarketError(error.message);
+        setSelectedMarket(current => current?.symbol === symbol ? { ...current, stale: true } : current);
+      }
+    }).finally(() => { if (!controller.signal.aborted) setDetailLoading(false); });
     return () => controller.abort();
   }, [symbol, data?.fetchedAt]);
+  useEffect(() => {
+    setHistoryError('');
+    if (!historyRange) { setHistoryLoading(false); return; }
+    const controller = new AbortController();
+    setHistoryLoading(true);
+    api<MarketHistory>(`/api/markets/${encodeURIComponent(symbol)}/history?range=${historyRange}`, { signal: controller.signal }).then(result => {
+      if (!controller.signal.aborted) setSelectedHistory(result);
+    }).catch(error => {
+      if (!controller.signal.aborted) {
+        setHistoryError(error.message);
+        setSelectedHistory(current => current?.symbol === symbol && current.range === historyRange ? { ...current, stale: true } : current);
+      }
+    }).finally(() => { if (!controller.signal.aborted) setHistoryLoading(false); });
+    return () => controller.abort();
+  }, [symbol, historyRange, data?.fetchedAt]);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(''), 5000); return () => clearTimeout(timer); }, [toast]);
   useEffect(() => { const listener = (event: KeyboardEvent) => { if ((event.metaKey || event.ctrlKey) && event.key === 'k') { event.preventDefault(); setView('overview'); setTimeout(() => searchRef.current?.focus(), 0); } if (event.key === 'Escape') setMenu(false); }; window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener); }, []);
   useEffect(() => {
@@ -111,6 +146,7 @@ export default function App() {
     try {
       const result = await api<MarketChatResult>('/api/chat', { method: 'POST', body: JSON.stringify({ message, horizon, history }) });
       setChatMessages(items => [...items, { id: result.id, role: 'assistant', text: result.reply, result }]);
+      setToast('Ranking saved. Outcomes will be checked after 4h, 24h, and 7 days.');
       return true;
     } catch (error) { setChatError(error instanceof Error ? error.message : 'Market scan failed.'); return false; }
     finally { setChatBusy(false); }
@@ -119,6 +155,7 @@ export default function App() {
   const navItems: { id: View; label: string; icon: typeof Activity; count?: number }[] = [
     { id: 'overview', label: 'Overview', icon: LayoutDashboard },
     { id: 'chat', label: 'AI market chat', icon: MessageSquareText },
+    { id: 'rankings', label: 'Chat rankings', icon: Clock3 },
     { id: 'journal', label: 'Forecast journal', icon: Layers3, count: forecasts.length },
     { id: 'replay', label: 'Baseline replay', icon: ChartNoAxesCombined },
   ];
@@ -140,28 +177,32 @@ export default function App() {
     <div className="main-shell">
       <header className="topbar"><div className="breadcrumb"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMenu(true)}><Menu size={19} /></button><span className="breadcrumb-root">Workspace</span><ChevronRight size={13} /><span>{titles[view]}</span></div><div className="topbar-right"><span className="connection"><StatusDot warning={Boolean(health?.demo || error || !data || markets.some(item => item.stale))} />{health?.demo ? 'Demo environment' : data && !error ? 'Market feed connected' : loading ? 'Connecting' : 'Connection interrupted'}</span><span className="topbar-divider" /><button className="icon-button" aria-label="Open forecast journal" onClick={() => navigate('journal')}><Bell size={17} />{forecasts.some(item => item.outcome) && <span className="notification-dot" />}</button><button className="topbar-avatar" aria-label="Workspace settings" onClick={() => navigate('settings')}>R</button></div></header>
       <main>
-        <section className="page-heading"><div><div className="eyebrow"><span />YOUR MARKET EDGE</div><h1>{titles[view]}</h1><p>{subtitles[view]}</p></div><div className="heading-actions"><button className={`button secondary refresh-button ${refreshing ? 'is-refreshing' : ''}`} onClick={() => void refresh()} disabled={refreshing}><RefreshCw size={15} /><span>Refresh data</span></button>{view !== 'chat' && <button className="button primary" onClick={() => void runForecast()} disabled={running || !market || market.stale || Boolean(error)}>{running ? <LoaderCircle size={16} className="spin" /> : <ScanLine size={16} />}{running ? 'Analyzing market…' : canJev ? 'Run JEV forecast' : 'Run baseline'}{!running && <span className="button-arrow">↗</span>}</button>}</div></section>
+        <section className="page-heading"><div><div className="eyebrow"><span />YOUR MARKET EDGE</div><h1>{titles[view]}</h1><p>{subtitles[view]}</p></div><div className="heading-actions"><button className={`button secondary refresh-button ${refreshing ? 'is-refreshing' : ''}`} onClick={() => void refresh()} disabled={refreshing}><RefreshCw size={15} /><span>Refresh data</span></button>{view !== 'chat' && view !== 'rankings' && <button className="button primary" onClick={() => void runForecast()} disabled={running || detailLoading || !market || market.stale || Boolean(error)}>{running ? <LoaderCircle size={16} className="spin" /> : <ScanLine size={16} />}{running ? 'Analyzing market…' : canJev ? 'Run JEV forecast' : 'Run baseline'}{!running && <span className="button-arrow">↗</span>}</button>}</div></section>
         {health?.demo && <div className="notice demo-notice"><Radio size={16} /><span><b>Demo environment.</b> Prices and outcomes are synthetic. JEV is disabled.</span><button onClick={() => navigate('settings')}>Connect live data <ArrowRight size={13} /></button></div>}
         {error && <div className="notice error-notice" role="alert"><Activity size={17} /><span>{error}</span><button onClick={() => void refresh()}>Retry <RefreshCw size={13} /></button></div>}
         {marketError && <div className="notice error-notice" role="alert"><Activity size={16} /><span>{symbol}: {marketError}</span></div>}
         {data?.errors.length ? <div className="notice"><Radio size={16} /><span>Some feeds are unavailable: {data.errors.slice(0, 20).map(item => item.symbol).join(', ') + (data.errors.length > 20 ? ` and ${data.errors.length - 20} more` : '')}. Available markets are shown below.</span></div> : null}
         {!health?.configured && health && !health.demo && <div className="notice"><Cpu size={16} /><span>Baseline mode is ready. Connect OpenRouter to enable JEV’s direction probabilities.</span><button onClick={() => navigate('settings')}>Set up JEV <ArrowRight size={13} /></button></div>}
 
-        {view === 'chat' && <MarketChat messages={chatMessages} setMessages={messages => { setChatMessages(messages); if (!messages.length) setChatError(''); }} send={sendChat} busy={chatBusy} error={chatError} horizon={horizon} setHorizon={setHorizon} markets={markets} assetCount={assets.length} health={health} analyze={next => { setSymbol(next); navigate('overview'); }} />}
+        {view === 'chat' && <MarketChat messages={chatMessages} setMessages={messages => { setChatMessages(messages); if (!messages.length) setChatError(''); }} send={sendChat} busy={chatBusy} error={chatError} horizon={horizon} setHorizon={setHorizon} markets={markets} assets={assets} health={health} analyze={next => { setSymbol(next); navigate('overview'); }} />}
         {view === 'overview' && <>
           <Summary markets={markets} forecasts={forecasts} loading={loading} />
           <div className="analysis-grid">
-            <section className="panel chart-panel"><div className="chart-heading"><div className="asset-heading"><Coin symbol={symbol} /><div><div className="pair-select"><AssetPicker assets={assets} value={symbol} onChange={setSymbol} /><span>{symbol}/USD</span></div><span className="muted tiny">Kraken spot · 1h observations</span></div></div><div className="chart-switch"><button aria-label="Line chart" aria-pressed={chartKind === 'line'} className={chartKind === 'line' ? 'selected' : ''} onClick={() => setChartKind('line')}><TrendingUp size={17} /></button><button aria-label="Candlestick chart" aria-pressed={chartKind === 'candles'} className={chartKind === 'candles' ? 'selected' : ''} onClick={() => setChartKind('candles')}><ChartCandlestick size={17} /></button></div></div>
-              <div className="price-row"><div className="main-price">{market ? money(market.price) : '—'}{market && <Change value={market.change24h} />}<span className="tiny muted">24h</span></div><div className="segmented">{[{ value: 24, label: '24H' }, { value: 168, label: '7D' }, { value: 720, label: '30D' }].map(item => <button key={item.value} className={range === item.value ? 'selected' : ''} onClick={() => setRange(item.value)}>{item.label}</button>)}</div></div>
-              {market ? <Chart candles={market.candles} forecast={latest} range={range} kind={chartKind} /> : <div className={`chart-empty ${detailLoading ? 'skeleton' : ''}`}>{detailLoading ? 'Connecting to market data…' : 'This market is unavailable. Refresh or choose another asset.'}</div>}
-              <div className="chart-footer"><span><span className="legend-dot price" />Hourly close</span>{latest && <span><span className="legend-dot forecast" />Volatility scenario</span>}<span className="chart-timestamp">{market ? `${market.stale ? 'STALE · ' : ''}Updated ${shortTime(market.fetchedAt)}` : 'Awaiting data'}<StatusDot warning={!market || market.stale} /></span></div>
+            <section className="panel chart-panel">
+              <div className="chart-heading"><div className="asset-heading"><Coin symbol={symbol} /><div><div className="pair-select"><AssetPicker assets={assets} value={symbol} onChange={setSymbol} /><span>{symbol}/USD</span></div><span className="muted tiny">{health?.demo ? 'Demo' : 'Kraken spot'} · {closeLabel.toLowerCase()} observations</span></div></div><div className="chart-switch"><button aria-label="Line chart" aria-pressed={chartKind === 'line'} className={chartKind === 'line' ? 'selected' : ''} onClick={() => setChartKind('line')}><TrendingUp size={17} /></button><button aria-label="Candlestick chart" aria-pressed={chartKind === 'candles'} className={chartKind === 'candles' ? 'selected' : ''} onClick={() => setChartKind('candles')}><ChartCandlestick size={17} /></button></div></div>
+              <div className="price-row"><div className="main-price">{spotPrice !== undefined ? money(spotPrice) : '—'}{market && <Change value={market.change24h} />}<span className="tiny muted">{market ? '24h' : 'spot'}</span></div><div className="segmented" role="group" aria-label="Chart time range">{chartRanges.map(item => <button key={item.value} aria-pressed={range === item.value} className={range === item.value ? 'selected' : ''} onClick={() => setRange(item.value)}>{item.label}</button>)}</div></div>
+              {historyRange && historyError && <p className="chart-history-error" role="alert">{historyError}</p>}
+              {chartMarket ? <Chart key={`${symbol}:${range}`} candles={chartMarket.candles} forecast={historyRange ? undefined : latest} range={typeof range === 'number' ? range : chartMarket.candles.length} intervalMinutes={intervalMinutes} kind={chartKind} /> : <div className={`chart-empty ${chartLoading ? 'skeleton' : ''}`}>{chartLoading ? 'Loading Kraken observations…' : historyRange ? 'History is unavailable. Refresh or choose another time range.' : 'This market is unavailable. Refresh or choose another asset.'}</div>}
+              {history && <p className="chart-history-note">{history.limited ? 'Shorter history available · ' : ''}{new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).format(history.candles[0].time)} – {new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).format(history.candles.at(-1)!.time)} · {closeLabel.toLowerCase()} closes (UTC)</p>}
+              <div className="chart-footer"><span><span className="legend-dot price" />{closeLabel} close</span>{!historyRange && latest && <span><span className="legend-dot forecast" />Volatility scenario</span>}<span className="chart-timestamp">{chartMarket ? `${chartMarket.stale ? 'STALE · ' : ''}Updated ${shortTime(chartMarket.fetchedAt)}` : 'Awaiting data'}<StatusDot warning={!chartMarket || chartMarket.stale} /></span></div>
             </section>
-            <ForecastPanel forecast={latest} market={market} horizon={horizon} setHorizon={setHorizon} running={running} runForecast={runForecast} canJev={canJev} navigate={navigate} />
+            <ForecastPanel forecast={latest} market={detailLoading ? undefined : market} horizon={horizon} setHorizon={setHorizon} running={running} runForecast={runForecast} canJev={canJev} navigate={navigate} />
           </div>
           <div className="lower-grid"><MarketTable markets={markets} favorites={favorites} toggleFavorite={toggleFavorite} search={search} setSearch={setSearch} searchRef={searchRef} symbol={symbol} select={setSymbol} loading={loading} /><Signals market={market} /></div>
           <div className="insight-banner"><span className="insight-icon"><Waves size={21} /></span><div><strong>Conviction is useful. Context is essential.</strong><p>Explore the evidence behind a signal and compare it with a simple historical baseline.</p></div><button onClick={() => navigate('replay')}>Explore baseline replay <ArrowUpRight size={16} /></button></div>
         </>}
         {view === 'watchlist' && <><MarketTable markets={markets.filter(item => favorites.includes(item.symbol))} favorites={favorites} toggleFavorite={toggleFavorite} search={search} setSearch={setSearch} searchRef={searchRef} symbol={symbol} select={item => { setSymbol(item); navigate('overview'); }} loading={loading} full /><div className="add-assets panel"><div><h3>Make it your market.</h3><p className="muted">Browse {assets.length} Kraken cryptocurrencies, or follow them all.</p></div><div className="asset-chips"><button onClick={() => { const all = assets.map(asset => asset.symbol); setFavorites(all); try { localStorage.setItem('jev-watchlist', JSON.stringify(all)); } catch {} }}>Select all {assets.length} assets <Star size={13} /></button><button onClick={() => navigate('overview')}>Browse all markets <ArrowRight size={14} /></button></div></div></>}
+        {view === 'rankings' && <ChatRankings analyze={next => { setSymbol(next); navigate('overview'); }} />}
         {view === 'journal' && <Journal forecasts={forecasts} onSelect={setInspected} />}
         {view === 'replay' && <ReplayView assets={assets} replay={replay} loading={replayLoading} error={replayError} symbol={symbol} setSymbol={setSymbol} horizon={horizon} setHorizon={setHorizon} />}
         {view === 'settings' && <Settings health={health} markets={markets} />}

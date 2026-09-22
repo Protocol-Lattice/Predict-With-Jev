@@ -1,22 +1,27 @@
 import express, { type ErrorRequestHandler } from 'express';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import { z } from 'zod';
-import { HORIZONS, type Forecast, type Horizon } from '../shared/types.js';
+import { HISTORY_RANGES, HORIZONS, type Forecast, type Horizon } from '../shared/types.js';
 import { baselineDirection, HOUR, neutralThreshold, replay, scenarioRange } from './analysis.js';
 import { askJev, JevError, MODEL } from './jev.js';
 import { MarketError, MarketService } from './market.js';
-import { ForecastStore } from './store.js';
+import { ForecastStore, ForecastStoreError } from './store.js';
 import { MarketChatService } from './chat.js';
+import { ChatRankingStore, ChatRankingStoreError, summarizeRankings } from './chat-journal.js';
+import { ChatRankingEvaluator } from './chat-ranking-evaluator.js';
 
 const symbolSchema = z.string().min(1).max(30).regex(/^[A-Z0-9][A-Z0-9._-]*$/);
 const horizonSchema = z.coerce.number().refine(value => HORIZONS.includes(value as Horizon), 'Choose 4, 24, or 168 hours.').transform(value => value as Horizon);
 const forecastSchema = z.object({ symbol: symbolSchema, horizon: horizonSchema, engine: z.enum(['jev', 'baseline']) }).strict();
 
-export function createApp(options: { apiKey: string; demo: boolean; dataFile: string; marketService?: MarketService }) {
+export function createApp(options: { apiKey: string; demo: boolean; dataFile: string; chatDataFile?: string; marketService?: MarketService; chatService?: Pick<MarketChatService, 'scan' | 'status'> }) {
   const app = express();
   const markets = options.marketService ?? new MarketService(options.demo);
   const store = new ForecastStore(options.dataFile);
-  const chat = new MarketChatService(markets, options.apiKey, options.demo);
+  const chat = options.chatService ?? new MarketChatService(markets, options.apiKey, options.demo);
+  const rankings = new ChatRankingStore(options.chatDataFile ?? path.join(path.dirname(options.dataFile), options.demo ? 'demo-chat-rankings.json' : 'chat-rankings.json'));
+  const rankingEvaluator = new ChatRankingEvaluator(rankings, markets);
   const inFlight = new Map<string, Promise<Forecast>>();
   let requests = { start: Date.now(), count: 0 };
   app.disable('x-powered-by');
@@ -38,7 +43,21 @@ export function createApp(options: { apiKey: string; demo: boolean; dataFile: st
   });
   app.post('/api/chat', async (req, res) => {
     const input = z.object({ message: z.string().trim().min(3).max(1200), horizon: horizonSchema, history: z.array(z.string().max(1200)).max(4).default([]) }).strict().parse(req.body);
-    res.json(await chat.scan(input.message, input.horizon, input.history));
+    // Fail before paid inference if existing journal data cannot be preserved.
+    await rankings.list();
+    const result = await chat.scan(input.message, input.horizon, input.history);
+    await rankings.add(result, input.history);
+    res.json(result);
+  });
+  app.get('/api/chat/progress', (_req, res) => res.json(chat.status()));
+  app.get('/api/chat/rankings', async (req, res) => {
+    const { offset, limit } = z.object({ offset: z.coerce.number().int().min(0).default(0), limit: z.coerce.number().int().min(1).max(50).default(20) }).parse(req.query);
+    const records = await rankings.list();
+    res.json({ records: records.slice(offset, offset + limit), total: records.length, summary: summarizeRankings(records), evaluator: rankingEvaluator.status() });
+  });
+  app.post('/api/chat/rankings/evaluate', async (_req, res) => {
+    await rankingEvaluator.refresh();
+    res.json(rankingEvaluator.status());
   });
   app.get('/api/markets', async (_req, res) => {
     const result = await markets.all();
@@ -46,6 +65,12 @@ export function createApp(options: { apiKey: string; demo: boolean; dataFile: st
   });
   app.get('/api/markets/:symbol', async (req, res) => {
     res.json(await markets.get(symbolSchema.parse(req.params.symbol)));
+  });
+  app.get('/api/markets/:symbol/history', async (req, res) => {
+    const symbol = symbolSchema.parse(req.params.symbol);
+    const range = z.enum(HISTORY_RANGES).safeParse(req.query.range);
+    if (!range.success) return res.status(400).json({ error: 'Choose a history range of 1y or 5y.' });
+    res.json(await markets.history(symbol, range.data));
   });
   app.get('/api/replay/:symbol', async (req, res) => {
     const symbol = symbolSchema.parse(req.params.symbol);
@@ -101,6 +126,7 @@ export function createApp(options: { apiKey: string; demo: boolean; dataFile: st
   });
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown API route.' }));
   const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
+    if (error instanceof ForecastStoreError || error instanceof ChatRankingStoreError) return void res.status(500).json({ error: error.message });
     if (error instanceof z.ZodError) return void res.status(400).json({ error: 'Invalid request. Check the asset, horizon, engine, or prompt length (3–1,200 characters).' });
     if (error instanceof JevError) return void res.status(error.status).json({ error: error.message });
     if (error instanceof MarketError) return void res.status(503).json({ error: error.message });
@@ -110,5 +136,5 @@ export function createApp(options: { apiKey: string; demo: boolean; dataFile: st
     res.status(500).json({ error: 'The request could not be completed. Check the server and forecast journal.' });
   };
   app.use(errorHandler);
-  return app;
+  return Object.assign(app, { startChatRankingEvaluation: () => rankingEvaluator.start() });
 }

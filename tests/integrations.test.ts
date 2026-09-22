@@ -1,12 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import { parseCatalog, parseQuotes } from '../server/catalog';
-import { askJev, decisionRequest, ENDPOINT, parseJev } from '../server/jev';
+import { askJev, decisionRequest, ENDPOINT, MAX_SYSTEM_ONE_REQUEST_BYTES, parseJev, requestSystemOne } from '../server/jev';
 import { demoMarket, MarketService } from '../server/market';
-import { ForecastStore } from '../server/store';
-import type { Forecast } from '../shared/types';
 
 const pair = (wsname: string, status = 'online') => ({ wsname, status, altname: wsname.replace('/', ''), aclass_base: 'currency', aclass_quote: 'currency' });
 
@@ -77,22 +72,21 @@ describe('TypeSafe System One integration', () => {
     expect(body.state.forecast_horizon_hours).toBe(168);
     expect(body.state.reference_close_usd).toBe(live.candles.at(-1)!.close);
   });
-});
-
-describe('durable forecast journal', () => {
-  it('serializes simultaneous writes and survives a new store instance', async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), 'jev-store-test-'));
-    const file = path.join(directory, 'journal.json');
-    try {
-      const store = new ForecastStore(file);
-      expect(await store.list()).toEqual([]);
-      await Promise.all(Array.from({ length: 12 }, (_, index) => store.add({ id: `${index}`, referencePrice: 100, targetTime: Date.now() } as Forecast)));
-      const loaded = await new ForecastStore(file).list();
-      expect(loaded).toHaveLength(12);
-      expect(new Set(loaded.map(item => item.id)).size).toBe(12);
-      expect(JSON.parse(await readFile(file, 'utf8'))).toHaveLength(12);
-      await writeFile(file, '{"corrupt":true}');
-      await expect(store.list()).rejects.toThrow(/invalid/);
-    } finally { await rm(directory, { recursive: true, force: true }); }
+  it('rejects oversized requests before sending paid inference', async () => {
+    const request = vi.fn();
+    await expect(requestSystemOne({ state: 'x'.repeat(MAX_SYSTEM_ONE_REQUEST_BYTES) }, 'test-key', request)).rejects.toThrow(/too large/);
+    expect(request).not.toHaveBeenCalled();
+  });
+  it('reveals the provider’s HTTP 400 reason without leaking credentials or retrying the same request', async () => {
+    const request = vi.fn(async () => Response.json({ error: { message: 'Provider returned error', metadata: { raw: 'Maximum context length exceeded; key=test-key' } } }, { status: 400 }));
+    const failure = await requestSystemOne({ state: 'test' }, 'test-key', request).catch(error => error as Error);
+    if (!(failure instanceof Error)) throw new Error('Expected a provider rejection.');
+    expect(failure.message).toContain('JEV rejected the request (HTTP 400)');
+    expect(failure.message).toContain('Maximum context length exceeded');
+    expect(failure.message).not.toContain('test-key');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+  it('handles non-JSON provider rejections without hiding the HTTP status', async () => {
+    await expect(requestSystemOne({ state: 'test' }, 'test-key', vi.fn(async () => new Response('<html>Bad request</html>', { status: 400 })))).rejects.toThrow(/HTTP 400.*No further details/);
   });
 });

@@ -1,3 +1,5 @@
+import type { StablecoinScope } from './stablecoins.js';
+
 export const HORIZONS = [4, 24, 168] as const;
 export type Horizon = (typeof HORIZONS)[number];
 export type Direction = 'bullish' | 'neutral' | 'bearish';
@@ -68,6 +70,20 @@ export interface Market {
   source: 'kraken' | 'demo';
   stale: boolean;
 }
+export const HISTORY_RANGES = ['1y', '5y'] as const;
+export type HistoryRange = (typeof HISTORY_RANGES)[number];
+export interface MarketHistory {
+  symbol: Symbol;
+  range: HistoryRange;
+  intervalMinutes: 1440 | 10080;
+  candles: Candle[];
+  requestedFrom: number;
+  /** The pair has less history than the requested calendar range. */
+  limited: boolean;
+  fetchedAt: number;
+  source: 'kraken';
+  stale: boolean;
+}
 export interface MarketsResponse {
   assets: Asset[];
   markets: MarketQuote[];
@@ -128,6 +144,19 @@ export interface Health {
   demo: boolean;
 }
 
+export const CHAT_OBJECTIVES = ['best_fit', 'upside'] as const;
+export type ChatObjective = typeof CHAT_OBJECTIVES[number];
+export const CHAT_OBJECTIVE_LABELS: Record<ChatObjective, string> = {
+  best_fit: 'Best fit for your criteria',
+  upside: 'Short-term percentage upside',
+};
+export interface ChatMomentumEvidence {
+  return1hPercent: number | null;
+  return4hPercent: number | null;
+  return24hPercent: number | null;
+  relativeVolume4h: number | null;
+  priceVsPrior24hHighPercent: number | null;
+}
 export interface ChatCandidate {
   symbol: Symbol;
   name: string;
@@ -139,6 +168,7 @@ export interface ChatCandidate {
   trend: 'bullish' | 'bearish';
   hourlyVolatility: number;
   referenceTime: number;
+  momentum: ChatMomentumEvidence;
   risks: string[];
 }
 export interface MarketChatResult {
@@ -146,14 +176,22 @@ export interface MarketChatResult {
   prompt: string;
   reply: string;
   horizon: Horizon;
+  assetScope: StablecoinScope;
+  objective: ChatObjective;
   winner: Symbol | null;
+  /** Separate relative ranking leader, available even when all upside setups are weak. */
+  comparisonLeader: Symbol | null;
   candidates: ChatCandidate[];
+  /** For upside scans, the independent weak-setup weight; not part of the candidate ranking distribution. */
   noCandidateWeight: number;
   createdAt: number;
   dataAsOf: number;
   catalogCount: number;
   scannedCount: number;
   batches: number;
+  comparisonBatches: number;
+  modelCalls: number;
+  finalistCount: number;
   shortlistCount: number;
   evaluatedCount: number;
   unavailableSymbols: Symbol[];
@@ -161,6 +199,15 @@ export interface MarketChatResult {
   model: string;
   cost: number | null;
   latencyMs: number;
+}
+export interface ChatScanProgress {
+  stage: 'planning' | 'loading' | 'analyzing' | 'comparing' | 'complete' | 'failed';
+  assetScope: StablecoinScope | null;
+  objective: ChatObjective | null;
+  total: number;
+  hourlyChecked: number;
+  analyzed: number;
+  modelCalls: number;
 }
 export interface ChatMessage {
   id: string;

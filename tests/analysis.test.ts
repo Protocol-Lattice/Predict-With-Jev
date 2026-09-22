@@ -70,6 +70,32 @@ describe('Kraken observations', () => {
     expect(parsed.indicators).toEqual(indicators(parsed.candles));
     expect(parsed.stale).toBe(false);
   });
+  it('keeps hourly candles with no trades and a zero VWAP without inventing prices or volume', () => {
+    const data = payload();
+    const noTrades = data.result.XXBTZUSD.at(-2)!;
+    const close = noTrades[4];
+    noTrades.splice(1, 7, close, close, close, close, '0.00000', '0.00000', 0);
+    const parsed = parseKraken('SODA', data, NOW + 300_000);
+    expect(parsed.candles).toHaveLength(240);
+    expect(parsed.candles.at(-1)).toMatchObject({ time: NOW, close: Number(close), vwap: 0, volume: 0 });
+    expect(parsed.price).toBe(100000);
+    expect(parsed.indicators).toEqual(indicators(parsed.candles));
+    expect(parsed.volume24h).toBeCloseTo(parsed.candles.slice(-24).reduce((sum, candle) => sum + candle.volume * candle.vwap, 0));
+    expect(parsed.stale).toBe(false);
+  });
+  it.each([
+    ['0', '10', 1],
+    ['0', '0', 1],
+    ['0', '10', 0],
+    ['-1', '0', 0],
+    ['0', '0', -1],
+    ['0', '0', 0.5],
+    ['0', '0', NaN],
+  ])('rejects inconsistent VWAP %s, volume %s, and trade count %s', (vwap, volume, trades) => {
+    const data = payload();
+    data.result.XXBTZUSD[50].splice(5, 3, vwap, volume, trades);
+    expect(() => parseKraken('SODA', data, NOW)).toThrow(/Invalid/);
+  });
   it('refuses gaps, malformed prices, and exchange errors', () => {
     const gap = payload(); gap.result.XXBTZUSD.splice(100, 1);
     expect(() => parseKraken('BTC', gap, NOW)).toThrow(/missing/);

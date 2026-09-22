@@ -3,6 +3,23 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Forecast, Market } from '../shared/types.js';
 import { classifyReturn } from './analysis.js';
+import { forecastJournalSchema } from './forecast-schema.js';
+
+export class ForecastStoreError extends Error {
+  constructor(message: string) { super(message); this.name = 'ForecastStoreError'; }
+}
+
+function validateJournal(data: unknown, writing = false): Forecast[] {
+  const parsed = forecastJournalSchema.safeParse(data);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const location = issue.path.length ? ` at ${issue.path.join('.')}` : '';
+    throw new ForecastStoreError(writing
+      ? `The forecast could not be saved: invalid data${location}. Existing records have not been changed.`
+      : `The forecast journal is invalid${location}. Restore a valid backup before continuing. Existing records have not been changed.`);
+  }
+  return parsed.data;
+}
 
 export function resolveForecast(forecast: Forecast, market: Market, now = Date.now()): Forecast {
   if (forecast.outcome || forecast.symbol !== market.symbol || market.source !== forecast.dataSource || market.stale || forecast.targetTime > now) return forecast;
@@ -22,12 +39,10 @@ export class ForecastStore {
   private async read(): Promise<Forecast[]> {
     try {
       const data: unknown = JSON.parse(await readFile(this.file, 'utf8'));
-      if (!Array.isArray(data) || data.some(value => !value || typeof value.id !== 'string' || !Number.isFinite(value.referencePrice) || !Number.isFinite(value.targetTime))) {
-        throw new Error('The forecast journal is invalid. Restore it from a backup before continuing.');
-      }
-      return data as Forecast[];
+      return validateJournal(data);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      if (error instanceof SyntaxError) throw new ForecastStoreError('The forecast journal is invalid JSON. Restore a valid backup before continuing. Existing records have not been changed.');
       throw error;
     }
   }
@@ -39,7 +54,7 @@ export class ForecastStore {
 
   private update(transform: (items: Forecast[]) => Forecast[]): Promise<Forecast[]> {
     const next = this.queue.then(async () => {
-      const items = transform(await this.read()).slice(0, 2000);
+      const items = validateJournal(transform(await this.read()).slice(0, 2000), true);
       await mkdir(path.dirname(this.file), { recursive: true });
       const temporary = `${this.file}.${randomUUID()}.tmp`;
       await writeFile(temporary, JSON.stringify(items, null, 2), { mode: 0o600 });

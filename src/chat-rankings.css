@@ -1,0 +1,40 @@
+.rankings-page { display: grid; gap: 18px; }
+.ranking-overview > p { margin: 0 22px 16px; color: #a8b9ae; font-size: 12px; line-height: 1.8; }
+.ranking-overview .ranking-status { color: #7c9183; font-size: 10px; }
+.ranking-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.ranking-stats section { padding: 20px; }
+.ranking-stats strong { display: block; margin: 16px 0 10px; font: 26px var(--mono); }
+.ranking-stats p, .ranking-stats small { color: #829488; font-size: 11px; line-height: 1.8; }
+.ranking-record > summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 20px; padding: 22px; cursor: pointer; }
+.ranking-record > summary > div:first-child { flex: 1; min-width: 220px; }
+.ranking-record > summary::before { content: '＋'; color: #afce91; }
+.ranking-record[open] > summary::before { content: '−'; }
+.ranking-record h3 { margin: 9px 0; font-size: 13px; font-weight: 500; line-height: 1.6; overflow-wrap: anywhere; }
+.ranking-record summary p { color: #8aa080; font-size: 10px; }
+.ranking-preview { display: flex; gap: 24px; }
+.ranking-preview > div > span { display: block; margin-bottom: 8px; color: #9eb291; font-size: 10px; }
+.ranking-outcome { display: flex; flex-direction: column; gap: 5px; font-size: 11px; }
+.ranking-outcome strong { font-family: var(--mono); font-weight: 500; }
+.ranking-outcome small, .ranking-table td > small { color: #7c9183; font-size: 9px; }
+.ranking-detail { border-top: 1px solid #26312c; padding: 20px 22px; }
+.ranking-metadata { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; color: #a7be96; font-size: 10px; }
+.ranking-metadata button { margin-left: auto; }
+.ranking-reference { margin: 15px 0; color: #7c9183; font-size: 10px; line-height: 1.8; }
+.ranking-table-scroll { overflow-x: auto; }
+.ranking-table { width: 100%; min-width: 760px; border-collapse: collapse; text-align: left; }
+.ranking-table th { padding: 13px 10px; color: #829488; font-size: 9px; font-weight: 500; border-bottom: 1px solid #2d3a32; }
+.ranking-table td { padding: 14px 10px; font-size: 11px; border-bottom: 1px solid #202b25; }
+.ranking-table td > small { display: block; margin-top: 6px; }
+.ranking-table td button { display: inline-flex; gap: 6px; align-items: center; color: #c8dbb9; font-size: 11px; text-align: left; }
+.ranking-table td button b { color: #8aa080; font-size: 9px; }
+.ranking-empty { padding: 40px; text-align: center; color: #8aa080; }
+.ranking-empty h3 { margin: 15px 0; color: #c8dbb9; }
+.ranking-empty p { max-width: 600px; margin: 0 auto; font-size: 12px; line-height: 1.8; }
+.ranking-pagination { display: flex; gap: 20px; align-items: center; justify-content: center; font-size: 12px; color: #829488; }
+@media (max-width: 760px) {
+  .ranking-stats { grid-template-columns: 1fr; }
+  .ranking-record > summary, .ranking-detail { padding: 16px; }
+  .ranking-preview { width: 100%; justify-content: space-between; gap: 10px; }
+  .ranking-overview .panel-title { flex-wrap: wrap; gap: 12px; }
+  .ranking-record .eyebrow { font-size: 8px; }
+}

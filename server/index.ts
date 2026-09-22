@@ -19,8 +19,11 @@ if (process.env.NODE_ENV === 'production') {
   app.use(vite.middlewares);
 }
 
+let stopRankingEvaluation = () => {};
 const server = app.listen(port, '127.0.0.1', () => {
   console.log(`JEV Terminal ready at http://localhost:${port}${demo ? ' · DEMO DATA' : ''}`);
+  stopRankingEvaluation = app.startChatRankingEvaluation();
 });
+server.on('close', () => stopRankingEvaluation());
 server.on('error', error => { console.error(`Server could not start: ${error.message}`); process.exitCode = 1; });
 for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => server.close(() => process.exit(0)));
