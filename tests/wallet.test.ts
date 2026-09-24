@@ -113,6 +113,7 @@ describe('read-only EVM connection', () => {
   it('keeps native balances exact and does not guess decimals on unknown chains', () => {
     expect(nativeBalance('0x1', '0xde0b6b3a7640001').amount).toBe('1.000000000000000001');
     expect(nativeBalance('0xaa36a7', '0x0')).toMatchObject({ amount: '0', network: 'Sepolia testnet' });
+    expect(nativeBalance('0x2105', '0xde0b6b3a7640001')).toEqual({ amount: '1.000000000000000001', network: 'Base Mainnet', unit: 'ETH' });
     expect(nativeBalance('0x38', '0x20000000000001')).toEqual({ network: 'Chain 56', amount: '9007199254740993', unit: 'native base units' });
   });
 });

@@ -21,7 +21,7 @@ For an offline walkthrough, set `DEMO_MODE=true` in `.env` and restart. This use
 
 ## Features
 
-- **Wallet & paper trading:** connect an EVM browser wallet to read its address, network and native balance. Run an independent, persistent virtual account with autonomous BUY/HOLD/SELL decisions, explicit costs, limits, pause and journal export. No real orders or on-chain transactions are submitted.
+- **Wallet & trading:** connect MetaMask or Rabby, review live Base ETH/USDC quotes, and confirm each real swap in your wallet. An independent, persistent virtual account supports autonomous paper BUY/HOLD/SELL decisions, costs, limits, pause and journal export.
 - Full dynamic Kraken crypto/USD catalog, searchable market picker, paginated prices, favorites, and **Select all assets**. The catalog refreshes every six hours. Fiat currencies, offline pairs, and the separate tokenized-stock product are excluded. An unavailable ticker is disclosed instead of invented.
 - **Staged decisions:** `market regime → candidate filter → setup quality → risk gate → action`, with separate JEV questions, recorded inputs and probabilities, and an offline stage benchmark. The final action is a deterministic research policy.
 - **AI market chat** follows your requested stablecoin scope: ask to research stablecoins, exclude them, or include them alongside other assets. Every eligible asset with usable hourly evidence is analyzed by JEV before any shortlist is formed. Bounded comparisons then retain candidates for a final ranking. Candidate-filter prompts include quotes, asset classifications, hourly technical indicators, and the last 24 hourly closes. A live progress counter shows the chosen scope, hourly data checks, and markets analyzed.
@@ -35,11 +35,37 @@ For an offline walkthrough, set `DEMO_MODE=true` in `.env` and restart. This use
 - Baseline walk-forward replay with non-overlapping outcomes, always-neutral and hindsight majority-class benchmarks, and JSON export. These are technical-rule results, not JEV’s historical performance.
 - Responsive dark interface, keyboard-accessible controls, local fonts, and reduced-motion support.
 
-## EVM wallet and autonomous paper trading
+## EVM wallet and Base ETH/USDC swaps
 
-Open **Wallet & paper trading** in the sidebar. In a browser with MetaMask or Rabby installed, select the extension and click **Connect wallet**, then approve account access in the extension. Discovery uses [EIP-6963](https://eips.ethereum.org/EIPS/eip-6963); account/network events and reads use [EIP-1193](https://eips.ethereum.org/EIPS/eip-1193). A legacy injected provider is supported when no discovery announcement is available. Multiple extensions remain individually selectable.
+Open **Wallet & trading** in the sidebar. In a browser with MetaMask or Rabby installed, select the extension and click **Connect wallet**, then approve account access in the extension. Discovery uses [EIP-6963](https://eips.ethereum.org/EIPS/eip-6963); account/network events and reads use [EIP-1193](https://eips.ethereum.org/EIPS/eip-1193). A legacy injected provider is supported when no discovery announcement is available. Multiple extensions remain individually selectable.
 
-This connection is read-only: it requests accounts and reads the chain ID and native balance. It never requests a signature, token allowance, transaction, private key, or seed phrase. Account and network changes invalidate the displayed balance immediately. Addresses and balances remain in browser memory and are not sent to the app server or saved. Disconnect clears the local connection; site permission can be revoked separately inside the extension. Ethereum Mainnet and Sepolia balances display exact ETH amounts. Unknown chains show their numeric ID and raw native base units instead of guessing the currency/decimals. ERC-20 balances and WalletConnect/mobile pairing are not implemented. The Codex in-app browser may not have your wallet extension; use your usual browser.
+Connecting only grants account access and reads the chain ID and native balance. It does not sign or submit transactions. Account and network changes invalidate the displayed balance immediately. Addresses and balances remain in browser memory and are not sent to the app server. Disconnect clears the local connection; site permission can be revoked separately inside the extension. Ethereum Mainnet, Base Mainnet and Sepolia balances display exact ETH amounts. Unknown chains show their numeric ID and raw native base units instead of guessing the currency/decimals. The swap panel also reads Base USDC balance and allowance. General ERC-20 portfolio discovery and WalletConnect/mobile pairing are not implemented. The Codex in-app browser may not have your wallet extension; use your usual browser.
+
+The **Base · ETH / USDC** panel supports real, manually confirmed swaps on Base Mainnet (chain 8453):
+
+1. Connect your wallet and select Base. Enter your own amount and choose **BUY ETH — pay USDC** or **SELL ETH — receive USDC**. Keep ETH on Base for network fees in either direction.
+2. Click **Get live quote**. This performs RPC reads and simulations only. Review the input, quoted output, minimum received, pool fee, gas estimate and recipient. Quotes expire within 60 seconds; editing an input or changing the account/network invalidates them.
+3. When buying ETH without sufficient USDC allowance, first confirm a separate approval for **exactly the entered USDC amount**, addressed to the fixed Uniswap router. It costs gas and authorizes spending; it does not buy ETH. After inclusion, get a new quote and separately confirm the swap.
+4. Click **Confirm swap in wallet** and review the final transaction in MetaMask or Rabby. Only your wallet can authorize it. Submission is never retried automatically. The panel shows the transaction hash and polls its Base receipt; an included receipt is not a finality guarantee. Check wallet activity before retrying an uncertain submission.
+
+Routing compares the 0.01%, 0.05%, 0.3% and 1% direct Uniswap v3 WETH/USDC pools at the same block, choosing the largest available output. It does not search other DEXs or multihop routes, or claim the best market-wide price. ETH wrapping/unwrapping is part of the router multicall. The recipient is always the connected account. The contract call enforces minimum output and a deadline three minutes after the quote block. Quotes and pre-submission checks simulate the **current step**: the approval step does not establish that a later swap will succeed. The later swap requires a fresh quote and its own simulation. Balance, allowance, account and chain checks run again before the wallet request.
+
+The displayed L2 gas estimate includes a 20% gas-limit buffer and **excludes Base L1 data fees**. It is not a fee cap. The wallet displays the final fee; insufficient funds or changed prices can still cause rejection or a reverted transaction. There are no automatic live trades, delegated signing keys, paid model calls, or links from paper decisions to the swap button. Live swaps are disabled in demo mode. No seed phrase or private key is requested by the app.
+
+Fixed contracts follow the official [Uniswap Base deployment list](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-base-deployments) and [Circle native USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses):
+
+| Contract | Base address |
+| --- | --- |
+| SwapRouter02 | `0x2626664c2603336e57b271c5c0b26f421741e481` |
+| QuoterV2 | `0x3d4e44eb1374240ce5f1b871ab261cd16335b76a` |
+| WETH | `0x4200000000000000000000000000000000000006` |
+| Native USDC (not USDbC) | `0x833589fcd6edb6e08f4c7c32d4f71b54bda02913` |
+
+Wallet requests go directly through the selected extension; no wallet credentials or transaction requests pass through the app server. The browser stores only the last submitted transaction's hash, kind, time and status under `jev-base-last-transaction` so a reload can resume receipt checks. This hash links to public on-chain activity. It is not a complete trade journal. Disconnecting cannot cancel an already submitted transaction or revoke an allowance. Use your wallet to manage permissions, approvals and replaced/cancelled transactions.
+
+`npm run check:base` checks deployment bytecode, native USDC decimals, direct-pool quotes and router/approval simulations against public Base RPC. A hypothetical account balance exists only inside `eth_call`; the command has a read-method allowlist, uses no wallet or keys, and never signs or broadcasts. Public RPC rate limits can make this optional integration check unavailable. Unit tests use mock providers and no real funds.
+
+## Autonomous paper trading
 
 The **paper account is separate from the wallet**. It starts with $10,000 virtual USD, with a configurable Kraken asset, horizon, buy-order size, position limit, fee and adverse slippage. The defaults ($100 orders, $500 position limit, 25 bps fee, 10 bps slippage) are example simulation settings, not a financial recommendation or estimates of real execution costs. One basis point is 0.01%.
 
@@ -51,7 +77,7 @@ The **paper account is separate from the wallet**. It starts with $10,000 virtua
 
 Fills use the observed Kraken price at the check, adjusted adversely for configured slippage and fees. These are virtual fills, not executable DEX quotes: chain-specific token contracts, gas, liquidity, routing and order-book depth are not modeled. Equity is marked at the latest usable observation, with its timestamp shown. Neither this rule nor JEV forecasts establish trading profitability.
 
-The account and complete decision journal are atomically written to `data/paper-trading.json` (`data/demo-paper-trading.json` in demo mode). Reads validate records and replay their cash/position/fee arithmetic; corrupt data is not silently overwritten. The interface displays the latest 50 decisions; export includes the full journal. This is a local single-server store. It contains no wallet credentials or wallet addresses. This feature does not provide live trade execution or transaction-signing requests.
+The account and complete decision journal are atomically written to `data/paper-trading.json` (`data/demo-paper-trading.json` in demo mode). Reads validate records and replay their cash/position/fee arithmetic; corrupt data is not silently overwritten. The interface displays the latest 50 decisions; export includes the full journal. This is a local single-server store. It contains no wallet credentials or wallet addresses. Paper trading never requests a wallet transaction.
 
 ## Staged chat decisions
 
@@ -98,13 +124,13 @@ Upside results show observed 1h, 4h, and 24h close-to-close returns, average vol
 
 Chat scans do not fetch five-year history or show long-term coverage in results. Selection uses quotes and hourly evidence for the selected 4h/24h/7d research horizon. The dashboard’s 1Y and 5Y charts load separately on demand.
 
-The app does not buy anything. Relative selection weights are **not** probabilities of profit. Evidence descriptions are assembled from observed metrics rather than presented as JEV-generated reasoning. No live news, fundamentals, or order-book depth are included. Missing quotes and hourly histories are disclosed, and unavailable assets are not counted as analyzed. HTTP 400/422 responses display the provider’s rejection reason instead of advising an unchanged retry; credentials are redacted.
+Market chat does not execute trades. Relative selection weights are **not** probabilities of profit. Evidence descriptions are assembled from observed metrics rather than presented as JEV-generated reasoning. No live news, fundamentals, or order-book depth are included. Missing quotes and hourly histories are disclosed, and unavailable assets are not counted as analyzed. HTTP 400/422 responses display the provider’s rejection reason instead of advising an unchanged retry; credentials are redacted.
 
 Chat uses your selected horizon and the last four user prompts as context. If your time horizon changes, update the selector. The conversation view lives in the current page session; export it to retain the transcript. Completed rankings and their supplied prompt context are also saved automatically in the separate **Chat rankings** journal before the API returns success. The server deduplicates identical in-flight scans and keeps up to ten results for unchanged request/snapshot combinations. Repeated results with the same scan ID retain their original journal record and evaluation schedule. Only one full-market scan can run at once, with at least 15 seconds between starts. Chat rankings measure subsequent price returns; they remain separate from the three-class directional accuracy journal.
 
 Forecast horizons start at the latest completed hourly close, not the moment you click. The neutral threshold is `max(0.25%, 0.35 × hourly log-return volatility × √horizon)`. The volatility envelope is `reference × exp(±1.645 × volatility × √horizon)`; it assumes independent, normally distributed log returns and stable volatility. Its coverage has not been empirically validated.
 
-JEV returns three mutually exclusive probabilities. They are validated for finite values, plausible normalization, and agreement with its selected class. They are **not proven calibrated probabilities of future cryptocurrency prices**. The app provides experimental forecasts, not a demonstrated profitable trading strategy, and places no trades.
+JEV returns three mutually exclusive probabilities. They are validated for finite values, plausible normalization, and agreement with its selected class. They are **not proven calibrated probabilities of future cryptocurrency prices**. The app provides experimental forecasts, not a demonstrated profitable trading strategy. Forecasts do not execute real trades; the separate Base swap panel requires manual wallet confirmation.
 
 The baseline combines clipped normalized EMA spread (50%), 24-hour momentum (35%), and RSI (15%). Replays use only observations available at each forecast time. Kraken supplies roughly 30 days of hourly history, so long-horizon samples are especially small. Replays do not model execution, fees, slippage, or trading P&L.
 
@@ -126,6 +152,7 @@ npm run check     # TypeScript validation
 npm run build     # Type-check and production client bundle
 npm start         # Serve the production bundle and API on the same local port
 npm run smoke     # Check an already-running server; does not request new paid inference
+npm run check:base # Public Base RPC reads and eth_call simulations; no transactions broadcast
 npm run benchmark -- <rankings.json> <labels.json> # Offline scores by decision stage
 ```
 

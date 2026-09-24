@@ -5,8 +5,9 @@ import { HORIZONS, type Asset, type Horizon } from '../shared/types';
 import { discoverWallets, nativeBalance, WalletConnection, type WalletOption, type WalletState } from './wallet';
 import { api, exportJson, horizonLabel, money, timeLabel } from './utils';
 import './trading.css';
+import LiveSwapPanel from './LiveSwapPanel';
 
-function WalletPanel() {
+function WalletPanel({ liveEnabled }: { liveEnabled: boolean }) {
   const [wallets, setWallets] = useState<WalletOption[]>([]);
   const [selected, setSelected] = useState('');
   const [wallet, setWallet] = useState<WalletState>({ status: 'disconnected', name: null, account: null, chainId: null, balance: null, error: null, refreshing: false });
@@ -19,8 +20,8 @@ function WalletPanel() {
   }, []);
   const selectedWallet = wallets.find(item => item.id === selected) ?? wallets[0];
   const balance = wallet.chainId && wallet.balance ? nativeBalance(wallet.chainId, wallet.balance) : null;
-  return <section className="panel wallet-panel">
-    <div className="panel-title"><div><Wallet size={17} /><h2>EVM wallet</h2></div><span className="mini-pill">Read only</span></div>
+  return <><section className="panel wallet-panel">
+    <div className="panel-title"><div><Wallet size={17} /><h2>EVM wallet</h2></div><span className="mini-pill">Wallet connection</span></div>
     <div className="trading-panel-body">
       <p>Connect MetaMask or Rabby to read your public address, network, and native balance. Your wallet remains separate from the virtual trading account.</p>
       {wallet.status === 'disconnected' ? <div className="wallet-connect">
@@ -40,12 +41,12 @@ function WalletPanel() {
       </>}
       {!wallets.length && <p className="trading-note">Open this app in a browser with the MetaMask or Rabby extension enabled, then reload. The in-app browser may not have extensions.</p>}
       {wallet.error && <p className="trading-error" role="alert">{wallet.error}</p>}
-      <p className="trading-note">No seed phrase, private key, token approvals, signatures, or transaction requests. Local disconnect clears this app’s connection; revoke site access in the extension if needed. ERC-20 balances are not loaded.</p>
+      <p className="trading-note">Connecting reads your address, network and native balance. Live swaps require separate actions in the Base panel and confirmation in your wallet. Local disconnect clears this app’s connection; revoke site access in the extension if needed.</p>
     </div>
-  </section>;
+  </section><LiveSwapPanel provider={connection.current?.connectedProvider() ?? null} wallet={wallet} enabled={liveEnabled} /></>;
 }
 
-export default function TradingDesk({ active, assets }: { active: boolean; assets: Asset[] }) {
+export default function TradingDesk({ active, assets, liveEnabled }: { active: boolean; assets: Asset[]; liveEnabled: boolean }) {
   const [status, setStatus] = useState<PaperStatus | null>(null);
   const [config, setConfig] = useState<PaperConfig>({ ...DEFAULT_PAPER_CONFIG });
   const [error, setError] = useState('');
@@ -92,10 +93,10 @@ export default function TradingDesk({ active, assets }: { active: boolean; asset
   const setNumber = (key: 'orderUsd' | 'maxPositionUsd' | 'feeBps' | 'slippageBps', value: string) => setConfig(current => ({ ...current, [key]: value === '' ? NaN : Number(value) }));
 
   return <div className="trading-desk">
-    <div className="notice"><Wallet size={17} /><span><b>Wallet access + paper trading.</b> BUY/HOLD/SELL affects virtual USD and virtual positions only. Kraken research prices are not executable DEX quotes.</span></div>
+    <div className="notice"><Wallet size={17} /><span><b>Wallet & trading.</b> Live Base swaps require your wallet confirmation. Autonomous paper trading uses a separate virtual account. Kraken research prices are not executable DEX quotes.</span></div>
     <div className="trading-grid">
-      <WalletPanel />
-      <section className="panel">
+      <WalletPanel liveEnabled={liveEnabled} />
+      <section className="panel paper-configuration">
         <div className="panel-title"><div><h2>Autonomous paper trading</h2></div><span className="mini-pill">{status?.running ? 'Running · PAPER' : 'Paused · PAPER'}</span></div>
         <div className="trading-panel-body">
           <p>Start with {money(10_000)} virtual USD. A bullish signal buys up to your order limit; a bearish signal sells the whole virtual position; a neutral or unavailable signal holds.</p>

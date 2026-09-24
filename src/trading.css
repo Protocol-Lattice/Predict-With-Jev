@@ -18,6 +18,18 @@
 .paper-fields:disabled { opacity: .6; }
 .trading-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .trading-panel-body .trading-error { color: var(--red); font-size: 12px; line-height: 1.7; }
+.paper-configuration { grid-column: 1 / -1; }
+.live-pill { color: #eed392; border-color: #725c31; }
+.swap-review { display: grid; gap: 16px; padding: 16px; border: 1px solid #3b4937; border-radius: 8px; background: #121b14; }
+.swap-review-title { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }
+.swap-review-title span { color: #c4dbaa; }
+.swap-review dl { display: grid; gap: 12px; margin: 0; }
+.swap-review dl > div { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 1.3fr); gap: 14px; font-size: 11px; line-height: 1.7; }
+.swap-review dt { color: var(--muted); }
+.swap-review dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.trading-desk a { text-decoration: underline; text-underline-offset: 3px; }
+.swap-transaction { display: grid; gap: 10px; border-top: 1px solid var(--border); padding-top: 15px; font-size: 12px; line-height: 1.7; }
+.swap-transaction a { display: inline-flex; align-items: center; gap: 7px; }
 .paper-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 .paper-stats > div { padding: 20px; display: grid; gap: 12px; }
 .paper-stats span { font-size: 11px; color: var(--muted); }

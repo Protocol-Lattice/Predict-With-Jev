@@ -74,6 +74,7 @@ export class WalletConnection {
   private wallet: WalletOption | null = null;
   private cleanup: (() => void) | null = null;
   constructor(private update: (state: WalletState) => void) {}
+  connectedProvider(): EvmProvider | null { return this.state.status === 'connected' && this.state.account ? this.wallet?.provider ?? null : null; }
   private publish(patch: Partial<WalletState>) { this.state = { ...this.state, ...patch }; this.update({ ...this.state }); }
 
   disconnect() {
@@ -140,8 +141,8 @@ export function nativeBalance(chainId: string, balance: string): { network: stri
   const id = BigInt(chainId);
   const value = BigInt(balance);
   // Unknown chains are displayed in raw units, without guessing their native asset or decimals.
-  if (id !== 1n && id !== 11155111n) return { network: `Chain ${id}`, amount: value.toString(), unit: 'native base units' };
+  if (id !== 1n && id !== 11155111n && id !== 8453n) return { network: `Chain ${id}`, amount: value.toString(), unit: 'native base units' };
   const whole = value / 10n ** 18n;
   const fraction = (value % 10n ** 18n).toString().padStart(18, '0').replace(/0+$/, '');
-  return { network: id === 1n ? 'Ethereum Mainnet' : 'Sepolia testnet', amount: `${whole}${fraction ? `.${fraction}` : ''}`, unit: 'ETH' };
+  return { network: id === 1n ? 'Ethereum Mainnet' : id === 8453n ? 'Base Mainnet' : 'Sepolia testnet', amount: `${whole}${fraction ? `.${fraction}` : ''}`, unit: 'ETH' };
 }
