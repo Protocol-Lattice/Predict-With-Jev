@@ -21,6 +21,7 @@ For an offline walkthrough, set `DEMO_MODE=true` in `.env` and restart. This use
 
 ## Features
 
+- **Wallet & paper trading:** connect an EVM browser wallet to read its address, network and native balance. Run an independent, persistent virtual account with autonomous BUY/HOLD/SELL decisions, explicit costs, limits, pause and journal export. No real orders or on-chain transactions are submitted.
 - Full dynamic Kraken crypto/USD catalog, searchable market picker, paginated prices, favorites, and **Select all assets**. The catalog refreshes every six hours. Fiat currencies, offline pairs, and the separate tokenized-stock product are excluded. An unavailable ticker is disclosed instead of invented.
 - **Staged decisions:** `market regime → candidate filter → setup quality → risk gate → action`, with separate JEV questions, recorded inputs and probabilities, and an offline stage benchmark. The final action is a deterministic research policy.
 - **AI market chat** follows your requested stablecoin scope: ask to research stablecoins, exclude them, or include them alongside other assets. Every eligible asset with usable hourly evidence is analyzed by JEV before any shortlist is formed. Bounded comparisons then retain candidates for a final ranking. Candidate-filter prompts include quotes, asset classifications, hourly technical indicators, and the last 24 hourly closes. A live progress counter shows the chosen scope, hourly data checks, and markets analyzed.
@@ -33,6 +34,24 @@ For an offline walkthrough, set `DEMO_MODE=true` in `.env` and restart. This use
 - **Chat rankings** saves each completed scan, its prompt context, original candidate order, and purchase/comparison decision. Every finalist is tracked after **4h, 24h, and 7 days**, with automatic outcome checks and JSON export. Summary returns cover selected purchase candidates only.
 - Baseline walk-forward replay with non-overlapping outcomes, always-neutral and hindsight majority-class benchmarks, and JSON export. These are technical-rule results, not JEV’s historical performance.
 - Responsive dark interface, keyboard-accessible controls, local fonts, and reduced-motion support.
+
+## EVM wallet and autonomous paper trading
+
+Open **Wallet & paper trading** in the sidebar. In a browser with MetaMask or Rabby installed, select the extension and click **Connect wallet**, then approve account access in the extension. Discovery uses [EIP-6963](https://eips.ethereum.org/EIPS/eip-6963); account/network events and reads use [EIP-1193](https://eips.ethereum.org/EIPS/eip-1193). A legacy injected provider is supported when no discovery announcement is available. Multiple extensions remain individually selectable.
+
+This connection is read-only: it requests accounts and reads the chain ID and native balance. It never requests a signature, token allowance, transaction, private key, or seed phrase. Account and network changes invalidate the displayed balance immediately. Addresses and balances remain in browser memory and are not sent to the app server or saved. Disconnect clears the local connection; site permission can be revoked separately inside the extension. Ethereum Mainnet and Sepolia balances display exact ETH amounts. Unknown chains show their numeric ID and raw native base units instead of guessing the currency/decimals. ERC-20 balances and WalletConnect/mobile pairing are not implemented. The Codex in-app browser may not have your wallet extension; use your usual browser.
+
+The **paper account is separate from the wallet**. It starts with $10,000 virtual USD, with a configurable Kraken asset, horizon, buy-order size, position limit, fee and adverse slippage. The defaults ($100 orders, $500 position limit, 25 bps fee, 10 bps slippage) are example simulation settings, not a financial recommendation or estimates of real execution costs. One basis point is 0.01%.
+
+- **Saved JEV forecasts** uses the latest saved, unexpired JEV forecast matching the asset, horizon and environment, whose reference observation is at most two hours old. Missing forecasts cause HOLD. Generate new forecasts from Overview; the simulator does not call JEV or spend OpenRouter credits automatically.
+- **Technical baseline** uses the existing deterministic indicator rule. Demo mode defaults to this source and uses synthetic prices; live-price mode defaults to saved JEV forecasts.
+- A bullish signal buys up to the configured order notional, cash available after fees, and remaining position headroom. A bearish signal sells the entire virtual position. Neutral signals and unavailable, stale, future, or mismatched observations produce HOLD. No leverage or shorting is modeled. The position limit caps new buys; subsequent price increases can lift the existing position above the limit.
+- Click **Save paper settings**, then **Start paper trading**. Checks run every minute on the local server, including with the browser closed. No simulation starts merely by connecting a wallet or opening the page. At most one simulated trade is allowed for each asset/completed-hour observation, including across stop/start and server restarts. Repeated identical HOLD results are deduplicated.
+- **Pause simulation** invalidates in-flight results and waits for already-committed journal writes. Settings can change while paused; the asset can change when its position is empty. A server restart always leaves the runner paused. Feed failures and unreadable/invalid journals stop the runner with an explicit error.
+
+Fills use the observed Kraken price at the check, adjusted adversely for configured slippage and fees. These are virtual fills, not executable DEX quotes: chain-specific token contracts, gas, liquidity, routing and order-book depth are not modeled. Equity is marked at the latest usable observation, with its timestamp shown. Neither this rule nor JEV forecasts establish trading profitability.
+
+The account and complete decision journal are atomically written to `data/paper-trading.json` (`data/demo-paper-trading.json` in demo mode). Reads validate records and replay their cash/position/fee arithmetic; corrupt data is not silently overwritten. The interface displays the latest 50 decisions; export includes the full journal. This is a local single-server store. It contains no wallet credentials or wallet addresses. This feature does not provide live trade execution or transaction-signing requests.
 
 ## Staged chat decisions
 
@@ -127,6 +146,10 @@ Set `PORT` in `.env` or the environment to change the default port. For `npm run
 | `POST /api/chat` | `{ "message": "Find a liquid candidate", "horizon": 24, "history": [] }`; last four user prompts may be supplied |
 | `GET /api/chat/rankings?offset=0&limit=20` | Saved rankings, summary over the complete journal, and evaluator status; read-only, maximum page size 50 |
 | `POST /api/chat/rankings/evaluate` | Check due hourly outcomes; no model inference, concurrent requests share one check |
+| `GET /api/paper` | Virtual account, full decision journal, runner status; read-only |
+| `POST /api/paper/config` | Full `{ symbol, horizon, signal: "jev" \| "baseline", orderUsd, maxPositionUsd, feeBps, slippageBps }` configuration; paused only |
+| `POST /api/paper/start` | `{}`; explicitly start the local paper runner; no wallet access or real trades |
+| `POST /api/paper/stop` | `{}`; pause the runner and invalidate in-flight results |
 
 ## Implementation
 

@@ -1,6 +1,7 @@
 import express, { type ErrorRequestHandler } from 'express';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { PaperTrader, PaperTradingError } from './paper-trading.js';
 import { z } from 'zod';
 import { HISTORY_RANGES, HORIZONS, type Forecast, type Horizon } from '../shared/types.js';
 import { baselineDirection, HOUR, neutralThreshold, replay, scenarioRange } from './analysis.js';
@@ -22,6 +23,7 @@ export function createApp(options: { apiKey: string; demo: boolean; dataFile: st
   const chat = options.chatService ?? new MarketChatService(markets, options.apiKey, options.demo);
   const rankings = new ChatRankingStore(options.chatDataFile ?? path.join(path.dirname(options.dataFile), options.demo ? 'demo-chat-rankings.json' : 'chat-rankings.json'));
   const rankingEvaluator = new ChatRankingEvaluator(rankings, markets);
+  const paper = new PaperTrader(path.join(path.dirname(options.dataFile), options.demo ? 'demo-paper-trading.json' : 'paper-trading.json'), options.demo, markets, store);
   const inFlight = new Map<string, Promise<Forecast>>();
   let requests = { start: Date.now(), count: 0 };
   app.disable('x-powered-by');
@@ -40,6 +42,16 @@ export function createApp(options: { apiKey: string; demo: boolean; dataFile: st
   app.use(express.json({ limit: '12kb' }));
   app.get('/api/health', (_req, res) => {
     res.json({ model: MODEL, configured: Boolean(options.apiKey.trim()), demo: options.demo });
+  });
+  app.get('/api/paper', async (_req, res) => res.json(await paper.snapshot()));
+  app.post('/api/paper/config', async (req, res) => res.json(await paper.configure(req.body)));
+  app.post('/api/paper/start', async (req, res) => {
+    z.object({}).strict().parse(req.body);
+    res.json(await paper.start());
+  });
+  app.post('/api/paper/stop', async (req, res) => {
+    z.object({}).strict().parse(req.body);
+    res.json(await paper.stop());
   });
   app.post('/api/chat', async (req, res) => {
     const input = z.object({ message: z.string().trim().min(3).max(1200), horizon: horizonSchema, history: z.array(z.string().max(1200)).max(4).default([]) }).strict().parse(req.body);
@@ -126,6 +138,7 @@ export function createApp(options: { apiKey: string; demo: boolean; dataFile: st
   });
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown API route.' }));
   const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
+    if (error instanceof PaperTradingError) return void res.status(error.status).json({ error: error.message });
     if (error instanceof ForecastStoreError || error instanceof ChatRankingStoreError) return void res.status(500).json({ error: error.message });
     if (error instanceof z.ZodError) return void res.status(400).json({ error: 'Invalid request. Check the asset, horizon, engine, or prompt length (3–1,200 characters).' });
     if (error instanceof JevError) return void res.status(error.status).json({ error: error.message });
@@ -136,5 +149,5 @@ export function createApp(options: { apiKey: string; demo: boolean; dataFile: st
     res.status(500).json({ error: 'The request could not be completed. Check the server and forecast journal.' });
   };
   app.use(errorHandler);
-  return Object.assign(app, { startChatRankingEvaluation: () => rankingEvaluator.start() });
+  return Object.assign(app, { startChatRankingEvaluation: () => rankingEvaluator.start(), stopPaperTrading: () => paper.stop() });
 }

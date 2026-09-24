@@ -24,6 +24,8 @@ const server = app.listen(port, '127.0.0.1', () => {
   console.log(`JEV Terminal ready at http://localhost:${port}${demo ? ' · DEMO DATA' : ''}`);
   stopRankingEvaluation = app.startChatRankingEvaluation();
 });
-server.on('close', () => stopRankingEvaluation());
+server.on('close', () => { stopRankingEvaluation(); void app.stopPaperTrading().catch(() => {}); });
 server.on('error', error => { console.error(`Server could not start: ${error.message}`); process.exitCode = 1; });
-for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => server.close(() => process.exit(0)));
+for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => {
+  void app.stopPaperTrading().finally(() => server.close(() => process.exit(0))).catch(() => {});
+});
