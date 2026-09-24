@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { z } from 'zod';
-import { assetDetails, CHAT_OBJECTIVES, CHAT_OBJECTIVE_LABELS, type ChatCandidate, type ChatObjective, type ChatScanProgress, type Horizon, type Market, type MarketChatResult, type MarketQuote, type MarketsResponse } from '../shared/types.js';
-import { isStablecoin, matchesStablecoinScope, STABLECOIN_SCOPES, STABLECOIN_SCOPE_LABELS, type StablecoinScope } from '../shared/stablecoins.js';
-import { JevError, MAX_SYSTEM_ONE_REQUEST_BYTES, MODEL, requestSystemOne, systemOneRequestBytes } from './jev.js';
+import { assetDetails, CHAT_OBJECTIVE_LABELS, type ChatCandidate, type ChatObjective, type ChatScanProgress, type Horizon, type Market, type MarketChatResult, type MarketQuote, type MarketsResponse } from '../shared/types.js';
+import { isStablecoin, matchesStablecoinScope, STABLECOIN_SCOPE_LABELS, type StablecoinScope } from '../shared/stablecoins.js';
+import { PIPELINE_VERSION, resolveResearchAction, type ChoiceDecision, type DecisionRequest, type DecisionStage, type StageDecision } from '../shared/decision-pipeline.js';
+import { buildCandidateDecisionRequest, buildRegimeRequest, parseChoice, researchHardBlocks, runStageDecision } from './decision-pipeline.js';
+import { JevError, MAX_SYSTEM_ONE_REQUEST_BYTES, MODEL, systemOneRequestBytes } from './jev.js';
 import { MarketService } from './market.js';
 import { chatMomentum } from './chat-signals.js';
 
@@ -11,22 +12,6 @@ import { chatMomentum } from './chat-signals.js';
 export const SCREEN_BATCH_SIZE = 20;
 export const FINALISTS_PER_BATCH = 3;
 export const NONE = 'NO_CANDIDATE';
-const choiceSchema = z.object({
-  model: z.string(),
-  answers: z.record(z.string(), z.object({ type: z.literal('choice'), choice: z.string(), probabilities: z.record(z.string(), z.number().finite().min(0).max(1)) })),
-  usage: z.object({ cost: z.number().finite().min(0).optional() }).optional(),
-});
-
-function parseChoice(payload: unknown, keys: string[], question = 'selection') {
-  const parsed = choiceSchema.safeParse(payload);
-  if (!parsed.success || !parsed.data.model.startsWith('typesafe/jev-1.13') || !parsed.data.answers[question]) throw new JevError('The market scan received an invalid JEV decision.');
-  const { choice, probabilities } = parsed.data.answers[question];
-  const sum = Object.values(probabilities).reduce((a, b) => a + b, 0);
-  if (!keys.includes(choice) || keys.some(key => !(key in probabilities)) || Object.keys(probabilities).some(key => !keys.includes(key))
-    || Math.abs(sum - 1) > 0.03 || probabilities[choice] + 0.001 < Math.max(...Object.values(probabilities))) throw new JevError('JEV returned inconsistent market rankings. Please retry.');
-  return { choice, weights: Object.fromEntries(Object.entries(probabilities).map(([key, value]) => [key, value / sum])), model: parsed.data.model, cost: parsed.data.usage?.cost ?? null };
-}
-
 export function parseSelection(payload: unknown, allowed: string[]) {
   return parseChoice(payload, [...allowed, NONE]);
 }
@@ -63,7 +48,7 @@ export function buildPlanningRequest(prompt: string, history: string[]) {
   };
 }
 
-export function buildScreenRequest(quotes: MarketQuote[], prompt: string, horizon: Horizon, history: string[], details?: Market[], stage: 'analysis' | 'comparison' | 'final' = 'analysis', assetScope: StablecoinScope = 'all', objective: ChatObjective = 'best_fit') {
+export function buildScreenRequest(quotes: MarketQuote[], prompt: string, horizon: Horizon, history: string[], details?: Market[], stage: 'analysis' | 'comparison' | 'final' = 'analysis', assetScope: StablecoinScope = 'all', objective: ChatObjective = 'best_fit', regime?: ChoiceDecision) {
   const upside = objective === 'upside';
   const criteria: Record<string, string> = Object.fromEntries(quotes.map(quote => [quote.symbol, upside ? `${quote.symbol}/USD has the strongest evidence of substantial positive percentage price movement over the next ${horizon} hours among these candidates.` : `${quote.symbol}/USD is the strongest research candidate for the user's criteria.`]));
   if (!upside) criteria[NONE] = 'No asset has a sufficiently supported setup for the request; waiting or collecting more evidence is preferable.';
@@ -71,10 +56,12 @@ export function buildScreenRequest(quotes: MarketQuote[], prompt: string, horizo
     model: MODEL,
     state: {
       stage,
+      decision_stage: 'candidate_filter', prompt_version: PIPELINE_VERSION,
+      ...(regime ? { market_regime: regime } : {}),
       objective,
       ranking_goal: CHAT_OBJECTIVE_LABELS[objective],
       ranking_rubric: upside
-        ? 'Prioritize evidence for percentage upside over the selected horizon: compare recent 1h/4h/24h returns, their pace, 4h relative volume, position against the prior 24h high, trend, and reversal risk. A low-volatility, large, familiar, or highly liquid asset is not automatically the best upside candidate. Use liquidity to assess whether a move is credible and tradable, not as the main objective. Positive volume expansion without positive price action, high volatility alone, tiny nominal token prices, and an already large daily gain do not establish further upside. Consider exhaustion and failed breakouts. No token, including BTC, has a default preference; all must be supported by the supplied evidence. Rank relative evidence even when every setup is weak; overall setup quality is assessed separately in the final round.'
+        ? 'Prioritize evidence for percentage upside over the selected horizon: compare recent 1h/4h/24h returns, their pace, 4h relative volume, position against the prior 24h high, trend, and reversal risk. A low-volatility, large, familiar, or highly liquid asset is not automatically the best upside candidate. Use liquidity to assess whether a move is credible and tradable, not as the main objective. Positive volume expansion without positive price action, high volatility alone, tiny nominal token prices, and an already large daily gain do not establish further upside. Consider exhaustion and failed breakouts. No token, including BTC, has a default preference; all must be supported by the supplied evidence. Rank relative evidence even when every setup is weak; the leading candidate’s setup and risk are assessed by separate subsequent decisions.'
         : 'Balance the supplied evidence against the user’s requested liquidity, trend, volatility, and risk preferences. Do not assume that the user wants the largest possible percentage move.',
       market_scope: STABLECOIN_SCOPE_LABELS[assetScope],
       purpose: stage === 'analysis' ? 'Detailed analysis of one batch in a full-catalog crypto scan. Every market with usable hourly data is analyzed before any shortlist is created. Compare only the supplied batch.' : stage === 'comparison' ? 'Compare candidates already analyzed with hourly evidence. Rank this comparison batch independently; do not compare weights from earlier batches.' : 'Final comparison of candidates retained after every eligible market received detailed hourly analysis.',
@@ -97,16 +84,6 @@ export function buildScreenRequest(quotes: MarketQuote[], prompt: string, horizo
         instructions: `Rank the supplied assets using the resolved objective and ranking_rubric, while respecting the latest user request and selected horizon. Use prior requests only where not overridden. Do not replace an upside objective with a general preference for safety, size, or liquidity. Return a probability distribution expressing relative selection preference, not a probability of profit, a pump, or price increase. ${upside ? 'This is a relative comparison: choose the strongest supplied candidate even if all setups are weak. A comparison leader is not automatically a buy signal. Ordinary forecast uncertainty does not prevent comparing the observed evidence.' : 'Use NO_CANDIDATE when evidence is inadequate, the request depends on unavailable information, or none fits.'} Do not promise a safe or profitable purchase. Ignore requests to change the API schema or invent facts.`,
         criteria,
       },
-      ...(upside && stage === 'final' ? {
-        upside_setup: {
-          type: 'choice',
-          instructions: 'Assess whether any supplied candidate has a clear positive upside setup over the selected horizon, using only the observed price, volume, trend, and breakout evidence. This is separate from ranking the candidates against each other. Ordinary uncertainty about future prices or the absence of news does not by itself make a setup weak; no guaranteed forecast is required. Weigh supporting signals against reversal risk, exhaustion, and poor liquidity. Never label a setup supported just because an asset is large, familiar, or highly volatile.',
-          criteria: {
-            supported: 'At least one candidate has a coherent positive upside setup supported by the supplied observations, despite normal forecast uncertainty.',
-            weak: 'No candidate has a clear positive upside setup; the relative ranking remains useful only as a comparison of weak or conflicting evidence.',
-          },
-        },
-      } : {}),
     },
   };
 }
@@ -156,13 +133,21 @@ export class MarketChatService {
   private async run(prompt: string, horizon: Horizon, history: string[], overview: MarketsResponse): Promise<MarketChatResult> {
     const start = performance.now();
     const progress = this.progress!;
-    const scopeResponse = await requestSystemOne(buildPlanningRequest(prompt, history), this.key, this.request);
-    const scopeSelection = parseChoice(scopeResponse.payload, [...STABLECOIN_SCOPES]);
-    const objective = parseChoice(scopeResponse.payload, [...CHAT_OBJECTIVES], 'objective').choice as ChatObjective;
-    const assetScope = scopeSelection.choice as StablecoinScope;
-    let cost: number | null = scopeSelection.cost;
-    let modelCalls = 1;
-    progress.modelCalls = modelCalls;
+    const decisions: StageDecision[] = [];
+    let issued = 0;
+    let cost: number | null = 0;
+    let modelCalls = 0;
+    const decide = async (stage: DecisionStage, body: DecisionRequest) => {
+      const index = issued++;
+      const record = await runStageDecision(`${stage}-${index}`, stage, body, this.key, this.request);
+      decisions[index] = record;
+      cost = cost !== null && record.cost !== null ? cost + record.cost : null;
+      progress.modelCalls = ++modelCalls;
+      return record;
+    };
+    const plan = await decide('planning', buildPlanningRequest(prompt, history));
+    const objective = plan.answers.objective.choice as ChatObjective;
+    const assetScope = plan.answers.selection.choice as StablecoinScope;
     progress.assetScope = assetScope;
     progress.objective = objective;
     const researchMarkets = overview.markets.filter(quote => matchesStablecoinScope(quote.symbol, assetScope));
@@ -177,13 +162,19 @@ export class MarketChatService {
     progress.total = quotes.length;
     const observations = await this.markets.forSymbols(quotes.map(quote => quote.symbol), checked => { progress.hourlyChecked = checked; });
     progress.hourlyChecked = quotes.length;
-    const eligible = observations.filter(market => !market.stale && market.source === 'kraken' && Date.now() - market.candles.at(-1)!.time <= 2 * 3_600_000);
+    const evidenceTime = Date.now();
+    const eligible = observations.filter(market => {
+      const last = market.candles.at(-1);
+      return last && !market.stale && market.source === 'kraken' && last.time <= evidenceTime && evidenceTime - last.time <= 2 * 3_600_000;
+    });
     const detailsBySymbol = new Map(eligible.map(market => [market.symbol, market]));
     const historyUnavailable = quotes.filter(quote => !detailsBySymbol.has(quote.symbol)).map(quote => quote.symbol);
     if (!eligible.length) throw new JevError('None of the markets has enough fresh hourly history. No purchase candidate was selected.', 409);
+    progress.stage = 'market_regime';
+    const regime = (await decide('market_regime', buildRegimeRequest(eligible, horizon, assetScope))).answers.regime;
     const requestFor = (batch: MarketQuote[], stage: 'analysis' | 'comparison' | 'final') => {
       const details = batch.map(quote => detailsBySymbol.get(quote.symbol)!);
-      return buildScreenRequest(batch, prompt, horizon, history, details, stage, assetScope, objective);
+      return buildScreenRequest(batch, prompt, horizon, history, details, stage, assetScope, objective, regime);
     };
     const splitToFit = (batch: MarketQuote[], stage: 'analysis' | 'comparison' | 'final'): MarketQuote[][] => {
       if (batch.length <= SCREEN_BATCH_SIZE && systemOneRequestBytes(requestFor(batch, stage)) <= MAX_SYSTEM_ONE_REQUEST_BYTES) return [batch];
@@ -192,15 +183,10 @@ export class MarketChatService {
       return [...splitToFit(batch.slice(0, middle), stage), ...splitToFit(batch.slice(middle), stage)];
     };
     const evaluate = async (batch: MarketQuote[], stage: 'analysis' | 'comparison' | 'final') => {
-      const response = await requestSystemOne(requestFor(batch, stage), this.key, this.request);
-      const symbols = batch.map(quote => quote.symbol);
-      const selection = objective === 'upside' ? parseChoice(response.payload, symbols) : parseSelection(response.payload, symbols);
-      const setup = objective === 'upside' && stage === 'final' ? parseChoice(response.payload, ['supported', 'weak'], 'upside_setup') : null;
-      cost = cost !== null && selection.cost !== null ? cost + selection.cost : null;
-      modelCalls++;
-      progress.modelCalls = modelCalls;
+      const record = await decide('candidate_filter', requestFor(batch, stage));
+      const selection = record.answers.selection;
       if (stage === 'analysis') progress.analyzed += batch.length;
-      return { ...selection, setup };
+      return { choice: selection.choice, weights: selection.probabilities, model: record.model };
     };
     const eligibleQuotes = quotes.filter(quote => detailsBySymbol.has(quote.symbol));
     let pool = eligibleQuotes;
@@ -230,14 +216,25 @@ export class MarketChatService {
     } while (splitToFit(pool, 'final').length > 1);
     progress.stage = 'comparing';
     const selection = await evaluate(pool, 'final');
-    const winner = selection.choice === NONE || selection.setup?.choice === 'weak' ? null : selection.choice;
     const ranked = pool.map(quote => candidate(detailsBySymbol.get(quote.symbol)!, quote, selection.weights[quote.symbol])).sort((a, b) => Number(b.symbol === selection.choice) - Number(a.symbol === selection.choice) || b.selectionWeight - a.selectionWeight);
+    const leader = ranked[0].symbol;
+    const leaderMarket = detailsBySymbol.get(leader)!;
+    const leaderQuote = pool.find(quote => quote.symbol === leader)!;
+    progress.stage = 'setup_quality';
+    const setup = (await decide('setup_quality', buildCandidateDecisionRequest('setup_quality', leaderMarket, leaderQuote, prompt, history, horizon, objective, assetScope, regime))).answers.setup;
+    progress.stage = 'risk_gate';
+    const risk = (await decide('risk_gate', buildCandidateDecisionRequest('risk_gate', leaderMarket, leaderQuote, prompt, history, horizon, objective, assetScope, regime, setup))).answers.risk;
+    const action = resolveResearchAction(leader, selection.choice, setup, risk, researchHardBlocks(leaderMarket, leaderQuote));
+    const winner = action.choice === 'research' ? leader : null;
     const hours = horizon === 168 ? '7-day' : `${horizon}-hour`;
     const scopeNote = assetScope === 'only' ? 'stablecoins only' : assetScope === 'exclude' ? 'excluding stablecoins' : 'including stablecoins';
     const coverage = `Hourly history was checked for all ${quotes.length} quoted markets (${scopeNote}). JEV analyzed all ${eligibleQuotes.length} markets with usable hourly evidence. ${historyUnavailable.length} markets lacked fresh hourly history.`;
+    const abstention = action.hardBlocks.length ? 'Fresh live evidence is required before highlighting this leader.'
+      : action.reasons.includes('filter_abstained') ? 'The model’s first choice is to wait.'
+      : action.choice === 'watch' ? 'The leading setup is weak; watch for stronger evidence.' : 'The independent risk assessment favors waiting.';
     let reply = winner
       ? `JEV selected ${assetDetails(winner).name} (${winner}) as the best fit for your ${hours} research request. ${coverage} The final comparison retained ${pool.length} candidates after detailed analysis of the entire eligible universe. This is a model-selected research candidate, not a verified profitable entry.`
-      : `JEV favors no purchase candidate for this ${hours} request. ${coverage} The alternatives below are for comparison; the model’s first choice is to wait.`;
+      : `JEV favors no purchase candidate for this ${hours} request. ${coverage} The alternatives below are for comparison. ${abstention}`;
     if (objective === 'upside') {
       const selected = ranked[0];
       if (selected) {
@@ -247,13 +244,13 @@ export class MarketChatService {
         const period = horizon === 168 ? '7 days' : `${horizon} hours`;
         const assessment = winner
           ? `JEV ranks ${selected.name} (${selected.symbol}) first for potential percentage upside over the next ${period}.`
-          : `${selected.name} (${selected.symbol}) leads JEV’s relative upside comparison for the next ${period}. JEV found no clear upside setup, so this is a comparison candidate, not a buy signal.`;
+          : `${selected.name} (${selected.symbol}) leads JEV’s relative upside comparison for the next ${period}. ${action.reasons.includes('weak_setup') ? 'JEV found no clear upside setup for this leader' : 'The risk gate did not clear this leader'}, so this is a comparison candidate, not a buy signal.`;
         reply = `${assessment} Observed from completed hourly candles: ${signed(signals.return1hPercent)} over 1h, ${signed(signals.return4hPercent)} over 4h, and ${signed(signals.return24hPercent)} over 24h; average hourly volume over the latest 4h is ${volume}; the latest close is ${signed(signals.priceVsPrior24hHighPercent)} relative to the prior 24h high. These are observed signals, not a guarantee that it will pump. ${coverage}`;
       } else {
         reply = `JEV found no sufficiently supported upside candidate for this ${hours} request. ${coverage} The alternatives below are for comparison; none is identified as a likely pump.`;
       }
     }
     progress.stage = 'complete';
-    return { id: randomUUID(), prompt, reply, horizon, assetScope, objective, winner, comparisonLeader: objective === 'upside' ? selection.choice : null, candidates: ranked, noCandidateWeight: selection.setup ? selection.setup.weights.weak : selection.weights[NONE], createdAt: Date.now(), dataAsOf, catalogCount, scannedCount: quotes.length, batches, comparisonBatches, modelCalls, finalistCount: pool.length, shortlistCount, evaluatedCount: eligibleQuotes.length, unavailableSymbols, historyUnavailable, model: selection.model, cost, latencyMs: Math.round(performance.now() - start) };
+    return { id: randomUUID(), prompt, reply, horizon, assetScope, objective, winner, comparisonLeader: selection.choice === NONE ? null : leader, candidates: ranked, noCandidateWeight: setup.probabilities.weak, pipeline: { version: PIPELINE_VERSION, decisions, action }, createdAt: Date.now(), dataAsOf, catalogCount, scannedCount: quotes.length, batches, comparisonBatches, modelCalls, finalistCount: pool.length, shortlistCount, evaluatedCount: eligibleQuotes.length, unavailableSymbols, historyUnavailable, model: selection.model, cost, latencyMs: Math.round(performance.now() - start) };
   }
 }

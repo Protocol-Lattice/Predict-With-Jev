@@ -10,6 +10,7 @@
     "start": "NODE_ENV=production tsx server/index.ts",
     "test": "vitest run",
     "check": "tsc --noEmit",
+    "benchmark": "node --import tsx scripts/benchmark-decisions.ts",
     "smoke": "node --import tsx scripts/smoke.ts"
   },
   "dependencies": {

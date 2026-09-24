@@ -5,6 +5,7 @@ import { CHAT_OBJECTIVE_LABELS } from '../shared/types';
 import { STABLECOIN_SCOPE_LABELS } from '../shared/stablecoins';
 import { api, exportJson, horizonLabel, money, percent, timeLabel } from './utils';
 import './chat-rankings.css';
+import DecisionSummary from './DecisionSummary';
 
 const PAGE_SIZE = 20;
 
@@ -26,6 +27,7 @@ export function RankingRecord({ record, analyze }: { record: ChatRankingRecord; 
     </summary>
     <div className="ranking-detail"><div className="ranking-metadata"><span>{STABLECOIN_SCOPE_LABELS[scan.assetScope]}</span><span>Requested horizon: {horizonLabel(scan.horizon)}</span><span>{scan.model}</span><button className="button secondary" onClick={() => exportJson(record, `jev-ranking-${scan.id}.json`)}><Download size={13} />Export ranking</button></div>
       <p className="ranking-reference">Measured from the first hourly close after saving: <b>{timeLabel(record.referenceTime)}</b>. All returns use the exact completed close at the listed target time. Fees and slippage are excluded.</p>
+      {scan.pipeline && <DecisionSummary pipeline={scan.pipeline} />}
       <div className="ranking-table-scroll"><table className="ranking-table"><thead><tr><th>Rank</th><th>Asset / original role</th><th>Selection weight</th><th>Reference close</th><th>After 4h</th><th>After 24h</th><th>After 7 days</th></tr></thead><tbody>
         {scan.candidates.map((candidate, index) => {
           const tracking = record.tracking[index];

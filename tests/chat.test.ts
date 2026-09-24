@@ -8,6 +8,15 @@ import type { Asset, ChatObjective, MarketChatResult, MarketQuote, MarketsRespon
 import type { StablecoinScope } from '../shared/stablecoins';
 import { chatMomentum } from '../server/chat-signals';
 import MarketChat from '../src/MarketChat';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import type { ChoiceDecision } from '../shared/decision-pipeline';
+import { ChatRankingStore, createRankingRecord } from '../server/chat-journal';
+import { chatRankingJournalSchema } from '../server/chat-journal-schema';
+import { benchmarkDecisions, decisionLabelTemplate } from '../server/decision-benchmark';
+import { runStageDecision } from '../server/decision-pipeline';
+import { HOUR } from '../server/analysis';
 
 function universe(size = 619, symbols: string[] = []): MarketsResponse {
   const markets: MarketQuote[] = Array.from({ length: size }, (_, index) => ({ symbol: symbols[index] ?? `COIN${index}`, name: `Coin ${index}`, price: index + 1, changeToday: 1, volume24h: 2_000_000 + index, high24h: index + 2, low24h: index + 0.5, source: 'kraken', stale: false, fetchedAt: Date.now() }));
@@ -17,17 +26,17 @@ function universe(size = 619, symbols: string[] = []): MarketsResponse {
 function service(overview: MarketsResponse) {
   return { all: vi.fn(async () => overview), history: vi.fn(async () => { throw new Error('Chat must not request long-term history'); }), forSymbols: vi.fn(async (symbols: string[]) => symbols.map(symbol => ({ ...demoMarket('BTC'), symbol, source: 'kraken' as const }))) } as unknown as MarketService;
 }
-function model(abstain = false, scope: StablecoinScope = 'all', objective: ChatObjective = 'best_fit', preferred?: string) {
+function model(abstain = false, scope: StablecoinScope = 'all', objective: ChatObjective = 'best_fit', preferred?: string, overrides: Partial<Record<string, ChoiceDecision>> = {}) {
   return vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
     const body = JSON.parse(init!.body as string);
-    const options = Object.keys(body.questions.selection.criteria);
-    const planning = body.state.stage === 'planning';
-    const choice = planning ? scope : abstain && options.includes(NONE) ? NONE : preferred && options.includes(preferred) ? preferred : options[0];
-    return Response.json({ model: 'typesafe/jev-1.13', answers: {
-      selection: { type: 'choice', choice, probabilities: Object.fromEntries(options.map(option => [option, option === choice ? 1 : 0])) },
-      ...(planning ? { objective: { type: 'choice', choice: objective, probabilities: { best_fit: objective === 'best_fit' ? 1 : 0, upside: objective === 'upside' ? 1 : 0 } } } : {}),
-      ...(body.questions.upside_setup ? { upside_setup: { type: 'choice', choice: abstain ? 'weak' : 'supported', probabilities: { supported: abstain ? 0 : 1, weak: abstain ? 1 : 0 } } } : {}),
-    }, usage: { cost: 0.0001 } });
+    const answers = Object.fromEntries(Object.entries(body.questions).map(([question, definition]) => {
+      const options = Object.keys((definition as { criteria: object }).criteria);
+      const choice = question === 'regime' ? 'trending_up' : question === 'setup' ? abstain ? 'weak' : 'supported'
+        : question === 'risk' ? 'allow' : question === 'objective' ? objective : body.state.stage === 'planning' ? scope
+        : abstain && options.includes(NONE) ? NONE : preferred && options.includes(preferred) ? preferred : options[0];
+      return [question, { type: 'choice', ...(overrides[question] ?? { choice, probabilities: Object.fromEntries(options.map(option => [option, option === choice ? 1 : 0])) }) }];
+    }));
+    return Response.json({ model: 'typesafe/jev-1.13', answers, usage: { cost: 0.0001 } });
   });
 }
 
@@ -55,7 +64,7 @@ describe('whole-market chat scanner', () => {
     const bodies = request.mock.calls.map(call => JSON.parse(call[1]!.body as string));
     expect(bodies[0].state).toMatchObject({ stage: 'planning', user_request: 'Which coin will pump?', earlier_user_requests: ['Find a stable coin'] });
     expect(Object.keys(bodies[0].questions.objective.criteria)).toEqual(['best_fit', 'upside']);
-    const rankings = bodies.slice(1);
+    const rankings = bodies.filter(body => body.state.decision_stage === 'candidate_filter');
     expect(new Set(rankings.map(body => body.state.stage))).toEqual(new Set(['analysis', 'comparison', 'final']));
     for (const body of rankings) {
       expect(body.state).toMatchObject({ objective: 'upside', ranking_goal: 'Short-term percentage upside', horizon_hours: 4 });
@@ -88,7 +97,7 @@ describe('whole-market chat scanner', () => {
     const result = await new MarketChatService(service(data), 'test-key', false, request).scan(prompt, 24);
     for (const call of request.mock.calls.slice(1)) {
       const body = JSON.parse(call[1]!.body as string);
-      expect(body.state.objective).toBe('best_fit');
+      if (body.state.stage !== 'market_regime') expect(body.state.objective).toBe('best_fit');
     }
     expect(result.objective).toBe('best_fit');
     expect(result.reply).toContain('best fit for your 24-hour research request');
@@ -142,7 +151,7 @@ describe('whole-market chat scanner', () => {
     const result = await chat.scan(prompt, 24);
     expect(markets.forSymbols).toHaveBeenCalledWith(expectedSymbols, expect.any(Function));
     expect(markets.history).not.toHaveBeenCalled();
-    const bodies = request.mock.calls.map(call => JSON.parse(call[1]!.body as string)).filter(body => body.state.stage !== 'planning');
+    const bodies = request.mock.calls.map(call => JSON.parse(call[1]!.body as string)).filter(body => body.state.decision_stage === 'candidate_filter');
     expect(new Set(bodies.map(body => body.state.stage))).toEqual(new Set(['analysis', 'comparison', 'final']));
     for (const body of bodies) {
       const symbols = body.state.markets.map((row: unknown[]) => row[0]);
@@ -182,7 +191,7 @@ describe('whole-market chat scanner', () => {
     expect(Object.keys(bodies[0].questions.selection.criteria)).toEqual(['all', 'only', 'exclude']);
     expect(markets.forSymbols).toHaveBeenCalledWith(['USDSM', 'USDC', 'USDT'], expect.any(Function));
     expect(markets.history).not.toHaveBeenCalled();
-    for (const body of bodies.slice(1)) {
+    for (const body of bodies.filter(body => body.state.decision_stage === 'candidate_filter')) {
       expect(body.state.market_scope).toBe('Stablecoins only');
       expect(body.state.markets.every((row: string[]) => ['USDSM', 'USDC', 'USDT'].includes(row[0]))).toBe(true);
       expect(body.state.markets.every((row: string[]) => row.at(-1) === 'fiat-pegged stablecoin')).toBe(true);
@@ -274,7 +283,7 @@ describe('whole-market chat scanner', () => {
     const request = model(true);
     const chat = new MarketChatService(service(universe(20)), 'test-key', false, request);
     const result = await chat.scan('Find a guaranteed winner', 24);
-    const final = JSON.parse(request.mock.calls.at(-1)![1]!.body as string);
+    const final = request.mock.calls.map(call => JSON.parse(call[1]!.body as string)).find(body => body.state.stage === 'final');
     const finalSymbols = Object.keys(final.questions.selection.criteria).filter(symbol => symbol !== NONE);
     expect(result.winner).toBeNull();
     expect(result.noCandidateWeight).toBe(1);
@@ -305,7 +314,7 @@ describe('whole-market chat scanner', () => {
     expect(result.evaluatedCount).toBe(20);
     for (const call of request.mock.calls) {
       const body = JSON.parse(call[1]!.body as string);
-      expect(body.state.user_request).toBe(prompt);
+      if (body.state.stage !== 'market_regime') expect(body.state.user_request).toBe(prompt);
       for (const evidence of body.state.technical_evidence ?? []) expect(evidence).not.toHaveProperty('five_year_history');
     }
     expect(result).not.toHaveProperty('longTermHistory');
@@ -373,5 +382,141 @@ describe('whole-market chat scanner', () => {
     payload.answers.selection.choice = 'BTC';
     payload.answers.selection.probabilities = { BTC: 1 } as typeof payload.answers.selection.probabilities;
     expect(() => parseSelection(payload, ['BTC'])).toThrow(/inconsistent/);
+  });
+});
+
+describe('staged market decisions', () => {
+  it('records separate bounded requests, conditions later stages on earlier answers, and replays a single stage', async () => {
+    const request = model(false, 'all', 'upside');
+    const data = universe(8);
+    const result = await new MarketChatService(service(data), 'key', false, request).scan('Find percentage upside', 24);
+    const pipeline = result.pipeline!;
+    expect(pipeline.version).toBe('1');
+    expect(pipeline.decisions.map(item => item.stage)).toEqual(['planning', 'market_regime', 'candidate_filter', 'candidate_filter', 'setup_quality', 'risk_gate']);
+    const [plan, regime, filter, final, setup, risk] = pipeline.decisions;
+    expect(Object.keys(plan.answers)).toEqual(['selection', 'objective']);
+    expect(Object.keys(final.answers)).toEqual(['selection']);
+    expect(Object.keys(setup.answers)).toEqual(['setup']);
+    expect(Object.keys(risk.answers)).toEqual(['risk']);
+    expect(filter.request.state.market_regime).toEqual(regime.answers.regime);
+    expect(risk.request.state.setup_quality).toEqual(setup.answers.setup);
+    expect(setup.request.state.subject).toBe(result.winner);
+    expect(risk.request.state.subject).toBe(result.winner);
+    expect(pipeline.action).toMatchObject({ choice: 'research', symbol: result.winner });
+    expect(new Set(pipeline.decisions.map(item => item.id)).size).toBe(result.modelCalls);
+    for (const item of pipeline.decisions) {
+      expect(item.request.state.prompt_version).toBe('1');
+      expect(item.request.state.decision_stage).toBe(item.stage);
+      expect(Buffer.byteLength(JSON.stringify(item.request))).toBeLessThanOrEqual(MAX_SYSTEM_ONE_REQUEST_BYTES);
+      expect(item.request).not.toHaveProperty('headers');
+    }
+    const before = request.mock.calls.length;
+    const replay = await runStageDecision('replay', setup.stage, setup.request, 'key', request);
+    expect(request).toHaveBeenCalledTimes(before + 1);
+    expect(replay.request).toEqual(setup.request);
+    expect(replay.answers).toEqual(setup.answers);
+    expect(renderResult(result, data)).toContain('Decision stages');
+  });
+
+  it.each([
+    { name: 'weak setup', overrides: { setup: { choice: 'weak', probabilities: { supported: 0.2, weak: 0.8 } } }, action: 'watch', reason: 'weak_setup' },
+    { name: 'risk veto', overrides: { risk: { choice: 'block', probabilities: { allow: 0.1, block: 0.9 } } }, action: 'wait', reason: 'risk_not_cleared' },
+    { name: 'tied setup', overrides: { setup: { choice: 'supported', probabilities: { supported: 0.5, weak: 0.5 } } }, action: 'watch', reason: 'weak_setup' },
+    { name: 'tied risk', overrides: { risk: { choice: 'allow', probabilities: { allow: 0.5, block: 0.5 } } }, action: 'wait', reason: 'risk_not_cleared' },
+  ])('keeps the comparison leader but withholds selection for $name', async ({ overrides, action, reason }) => {
+    const data = universe(4);
+    const result = await new MarketChatService(service(data), 'key', false, model(false, 'all', 'upside', undefined, overrides)).scan('Which coin will pump?', 4);
+    expect(result.winner).toBeNull();
+    expect(result.comparisonLeader).toBe(result.candidates[0].symbol);
+    expect(result.pipeline!.action).toMatchObject({ choice: action, reasons: [reason] });
+    if (reason === 'risk_not_cleared') {
+      expect(result.noCandidateWeight).toBe(0);
+      expect(result.reply).toContain('risk gate');
+      expect(result.reply).not.toContain('no clear upside setup');
+      expect(renderResult(result, data)).not.toContain('No clear upside setup was identified');
+    }
+  });
+
+  it('honors a filter abstention even when the setup and risk gates approve', async () => {
+    const request = model(true, 'all', 'best_fit', undefined, { setup: { choice: 'supported', probabilities: { supported: 1, weak: 0 } } });
+    const result = await new MarketChatService(service(universe(3)), 'key', false, request).scan('Compare assets', 24);
+    expect(result.pipeline!.action).toMatchObject({ choice: 'wait', reasons: ['filter_abstained'] });
+    expect(result.winner).toBeNull();
+  });
+
+  it('does not let model approval bypass evidence that expired during inference', async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const base = model();
+      const request = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const result = await base(url, init);
+        if (JSON.parse(init!.body as string).state.stage === 'risk_gate') clock.mockReturnValue(now + 3 * HOUR);
+        return result;
+      });
+      const result = await new MarketChatService(service(universe(3)), 'key', false, request).scan('Find a liquid candidate', 24);
+      expect(result.winner).toBeNull();
+      expect(result.pipeline!.action).toMatchObject({ choice: 'wait', hardBlocks: ['expired_or_future_evidence'] });
+    } finally { clock.mockRestore(); }
+  });
+
+  it.each(['market_regime', 'setup_quality', 'risk_gate'])('fails closed for a malformed %s response', async stage => {
+    const base = model();
+    const request = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (JSON.parse(init!.body as string).state.stage === stage) return Response.json({ model: 'typesafe/jev-1.13', answers: {} });
+      return base(url, init);
+    });
+    const chat = new MarketChatService(service(universe(3)), 'key', false, request);
+    await expect(chat.scan('Compare assets', 24)).rejects.toThrow(/invalid/);
+    expect(chat.status()!.stage).toBe('failed');
+    expect(JSON.parse(request.mock.calls.at(-1)![1]!.body as string).state.stage).toBe(stage);
+  });
+
+  it('round-trips complete evidence in the durable journal and rejects contradictory or malformed pipelines', async () => {
+    const result = await new MarketChatService(service(universe(4)), 'key', false, model()).scan('Compare assets', 24);
+    const record = createRankingRecord(result, ['Preserve this context']);
+    expect(chatRankingJournalSchema.parse([record])).toEqual([record]);
+    const directory = await mkdtemp(path.join(tmpdir(), 'jev-pipeline-test-'));
+    try {
+      const file = path.join(directory, 'journal.json');
+      await new ChatRankingStore(file).add(result, ['Preserve this context']);
+      expect((await new ChatRankingStore(file).list())[0].scan.pipeline).toEqual(result.pipeline);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+    const mutations = [
+      (scan: MarketChatResult) => { scan.winner = null; },
+      (scan: MarketChatResult) => { scan.cost = 100; },
+      (scan: MarketChatResult) => { scan.pipeline!.decisions = []; },
+      (scan: MarketChatResult) => { scan.pipeline!.decisions.at(-1)!.answers = {}; },
+      (scan: MarketChatResult) => { scan.pipeline!.action.choice = 'wait'; },
+      (scan: MarketChatResult) => { scan.pipeline!.decisions.at(-1)!.answers.risk.probabilities.allow = 0.1; },
+      (scan: MarketChatResult) => { scan.pipeline!.decisions.at(-1)!.request.state.subject = 'INVENTED'; },
+      (scan: MarketChatResult) => { scan.pipeline!.decisions.at(-1)!.id = scan.pipeline!.decisions[0].id; },
+    ];
+    for (const mutate of mutations) {
+      const edited = structuredClone(record); mutate(edited.scan);
+      expect(chatRankingJournalSchema.safeParse([edited]).success).toBe(false);
+    }
+  });
+
+  it('benchmarks explicit labels with proper scores and calibration, excluding unlabeled decisions', async () => {
+    const request = model(false, 'all', 'best_fit', undefined, {
+      setup: { choice: 'supported', probabilities: { supported: 0.8, weak: 0.2 } },
+      risk: { choice: 'allow', probabilities: { allow: 0.7, block: 0.3 } },
+    });
+    const result = await new MarketChatService(service(universe(4)), 'key', false, request).scan('Compare assets', 24);
+    const records = [createRankingRecord(result, [])];
+    const template = decisionLabelTemplate(records);
+    const labels = template.filter(label => ['setup', 'risk'].includes(label.question)).map(label => ({ ...label, expected: label.question === 'setup' ? 'supported' : 'block' }));
+    const report = benchmarkDecisions(records, labels);
+    expect(report).toMatchObject({ labeledQuestions: 2, availableQuestions: 7, unlabeledQuestions: 5, scoredCalls: 2, cost: expect.closeTo(0.0002) });
+    expect(report.groups.find(group => group.stage === 'setup_quality')).toMatchObject({ samples: 1, accuracy: 1, brier: expect.closeTo(0.08), logLoss: expect.closeTo(-Math.log(0.8)), calibrationError: expect.closeTo(0.2) });
+    expect(report.groups.find(group => group.stage === 'risk_gate')).toMatchObject({ samples: 1, accuracy: 0, brier: expect.closeTo(0.98), logLoss: expect.closeTo(-Math.log(0.3)), calibrationError: expect.closeTo(0.7) });
+    expect(benchmarkDecisions(records, [])).toMatchObject({ groups: [], labeledQuestions: 0, unlabeledQuestions: 7 });
+    expect(() => benchmarkDecisions(records, [labels[0], labels[0]])).toThrow(/Duplicate label/);
+    expect(() => benchmarkDecisions(records, [{ ...labels[0], expected: 'profit' }])).toThrow(/outside/);
+    expect(() => benchmarkDecisions(records, [{ ...labels[0], decisionId: 'unknown' }])).toThrow(/Unknown/);
+    expect(() => benchmarkDecisions(records, template)).toThrow();
+    const plan = template.filter(label => ['selection', 'objective'].includes(label.question) && label.decisionId.startsWith('planning')).map(label => ({ ...label, expected: label.question === 'selection' ? 'all' : 'best_fit' }));
+    expect(benchmarkDecisions(records, plan)).toMatchObject({ labeledQuestions: 2, scoredCalls: 1, cost: 0.0001 });
   });
 });

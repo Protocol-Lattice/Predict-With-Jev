@@ -3,6 +3,7 @@ import { CHAT_OBJECTIVES, HORIZONS, type MarketChatResult } from '../shared/type
 import { STABLECOIN_SCOPES } from '../shared/stablecoins.js';
 import type { ChatRankingRecord } from '../shared/chat-journal.js';
 import { HOUR } from './analysis.js';
+import { decisionPipelineSchema } from './decision-schema.js';
 
 const finite = z.number().finite();
 const positive = finite.positive();
@@ -31,6 +32,7 @@ const scanSchema: z.ZodType<MarketChatResult> = z.object({
   modelCalls: count, finalistCount: count, shortlistCount: count, evaluatedCount: count,
   unavailableSymbols: z.array(symbol), historyUnavailable: z.array(symbol),
   model: text, cost: nonnegative.nullable(), latencyMs: nonnegative,
+  pipeline: decisionPipelineSchema.optional(),
 }).passthrough();
 
 const reference = z.discriminatedUnion('status', [
@@ -57,6 +59,18 @@ export const chatRankingSchema: z.ZodType<ChatRankingRecord> = z.object({
   if (new Set(symbols).size !== symbols.length || record.scan.finalistCount !== symbols.length) invalid(['scan', 'candidates'], 'Duplicate candidates or inconsistent finalist count.');
   if (record.scan.winner && !symbols.includes(record.scan.winner)) invalid(['scan', 'winner'], 'Winner is missing from the ranking.');
   if (record.scan.comparisonLeader && !symbols.includes(record.scan.comparisonLeader)) invalid(['scan', 'comparisonLeader'], 'Comparison leader is missing from the ranking.');
+  const pipeline = record.scan.pipeline;
+  if (pipeline && pipeline.decisions.length >= 6) {
+    const records = pipeline.decisions;
+    const final = records.at(-3)!.answers.selection;
+    const setup = records.at(-2)!.answers.setup;
+    const winner = pipeline.action.choice === 'research' ? pipeline.action.symbol : null;
+    const cost = records.every(item => item.cost !== null) ? records.reduce((sum, item) => sum + item.cost!, 0) : null;
+    if (!final || !setup || record.scan.winner !== winner || record.scan.modelCalls !== records.length || !closeEnough(record.scan.noCandidateWeight, setup.probabilities.weak)
+      || !symbols.includes(pipeline.action.symbol) || records.some(item => item.completedAt > record.scan.createdAt)
+      || (cost === null ? record.scan.cost !== null : record.scan.cost === null || !closeEnough(record.scan.cost, cost))
+      || record.scan.candidates.some(item => !closeEnough(item.selectionWeight, final.probabilities[item.symbol]))) invalid(['scan', 'pipeline'], 'Scan must agree with its recorded decisions.');
+  }
   if (record.tracking.length !== symbols.length || record.tracking.some((item, index) => item.symbol !== symbols[index])) invalid(['tracking'], 'Tracking must preserve the original ranking.');
   record.tracking.forEach((item, index) => {
     const base = ['tracking', index];

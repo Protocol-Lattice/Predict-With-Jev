@@ -1,4 +1,5 @@
 import type { StablecoinScope } from './stablecoins.js';
+import type { DecisionPipeline } from './decision-pipeline.js';
 
 export const HORIZONS = [4, 24, 168] as const;
 export type Horizon = (typeof HORIZONS)[number];
@@ -182,8 +183,10 @@ export interface MarketChatResult {
   /** Separate relative ranking leader, available even when all upside setups are weak. */
   comparisonLeader: Symbol | null;
   candidates: ChatCandidate[];
-  /** For upside scans, the independent weak-setup weight; not part of the candidate ranking distribution. */
+  /** With a pipeline: the leader's weak-setup weight, independent of ranking and risk. */
   noCandidateWeight: number;
+  /** Absent on historical scans created before staged decisions were introduced. */
+  pipeline?: DecisionPipeline;
   createdAt: number;
   dataAsOf: number;
   catalogCount: number;
@@ -201,7 +204,7 @@ export interface MarketChatResult {
   latencyMs: number;
 }
 export interface ChatScanProgress {
-  stage: 'planning' | 'loading' | 'analyzing' | 'comparing' | 'complete' | 'failed';
+  stage: 'planning' | 'loading' | 'market_regime' | 'analyzing' | 'comparing' | 'setup_quality' | 'risk_gate' | 'complete' | 'failed';
   assetScope: StablecoinScope | null;
   objective: ChatObjective | null;
   total: number;
